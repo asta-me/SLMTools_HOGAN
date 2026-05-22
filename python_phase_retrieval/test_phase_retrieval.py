@@ -91,7 +91,6 @@ def zernike_low_order_mix(x: np.ndarray, y: np.ndarray, r_ref: float, coeffs: di
 # Experiment/solver controls.
 n = 1080                       # Grid size (n x n)
 nit = 300                      # Number of iterations
-beta = (0.0, 0.0)              # Linear phase ramp [rad/m] in SLM plane
 progress_every = 25   # Print progress every N iterations
 use_gpu = True        # Set False to force NumPy CPU
 amp_threshold = 0.15    # Threshold for phase RMSE metric (only where amplitude is relevant)
@@ -99,16 +98,26 @@ show_progress = True
 
 # Physical setup (SI units, SLM-plane coordinates).
 lambda_m = 780e-9              # Wavelength [m]
-f_m = 0.300                    # Lens focal length [m]
+f_m = 0.500                    # Lens focal length [m]
 flambda = f_m * lambda_m       # Wavelength × focal-length product [m^2]
 slm_pixel_pitch_m = 8.0e-6     # SLM pixel pitch [m]
 beam_sigma_on_slm_m = 0.9e-3   # Gaussian sigma on SLM [m]
 
+# Physical phase-diversity parameters (same style as 01_generate_phases.py).
+# Quadratic term: phi_quad = alpha * (x^2 + y^2), alpha in [rad / m^2].
+alphas_rad_per_m2 = np.linspace(10, 30, 4) * 1e6
+
+# Linear term from spatial frequencies [cycles / m]: phi_lin = 2*pi*(u*x + v*y).
+u_nyquist_cpm = 1.0 / (2.0 * slm_pixel_pitch_m)
+lin_x_cpm = -0.5 * u_nyquist_cpm
+lin_y_cpm = -0.5 * u_nyquist_cpm
+
+# ldot(beta, L) uses beta in [rad / m].
+beta = (2.0 * np.pi * lin_x_cpm, 2.0 * np.pi * lin_y_cpm)
+
 
 
 # All phase values below are defined on the SLM plane.
-# diversity_phase_at_slm_radius[i] = 0.5 * alpha_i * r_ref^2
-# where r_ref is the inscribed SLM reference radius.
 # Example low-order phase content in rad at rho=1 (rho = r/r_ref).
 # Keep values small to emulate mild but realistic aberrations.
 zernike_coeffs = {
@@ -122,9 +131,8 @@ zernike_coeffs = {
     "trefoil_x": 0.01,
     "trefoil_y": 0.0,
 }
-diversity_phase_at_slm_radius = [1.0, 1.6, 2.4]  # [rad] at r = SLM reference radius
 
-#%% Build synthetic dataset
+#%% Build SLM ground truth beam
 # Build a Gaussian amplitude and known astigmatic phase on the SLM lattice.
 coords_1d = (np.arange(n, dtype=float) - n // 2) * slm_pixel_pitch_m
 L = (coords_1d, coords_1d)
@@ -134,10 +142,17 @@ y = L[1].reshape(1, -1)
 
 # Inscribed reference radius on the SLM grid.
 slm_ref_radius_m = float(min(np.max(np.abs(L[0])), np.max(np.abs(L[1]))))
-amp_true = np.exp(-rr / (2.0 * beam_sigma_on_slm_m**2))
+# amp_true = np.exp(-rr / (2.0 * beam_sigma_on_slm_m**2))
 
-# Convert diversity phase from [rad at SLM reference radius] to alpha [rad/m^2].
-alphas = [2.0 * d / slm_ref_radius_m**2 for d in diversity_phase_at_slm_radius]
+# Rectangular input amplitude centered on the grid.
+rect_height_frac = 0.30
+rect_width_frac = 0.40
+h_box = int(round(n * rect_height_frac))
+w_box = int(round(n * rect_width_frac))
+y0 = (n - h_box) // 2
+x0 = (n - w_box) // 2
+amp_true = np.zeros((n, n), dtype=float)
+amp_true[y0:y0 + h_box, x0:x0 + w_box] = 1.0
 
 # True phase: mixture of low-order Zernike-like modes normalized on SLM reference radius.
 # Phase is evaluated on the whole grid (not just pupil)
@@ -150,27 +165,48 @@ power_total = float(np.sum(amp_true**2))
 power_inside = float(np.sum((amp_true**2)[inside_pupil]))
 power_inside_frac = power_inside / power_total if power_total > 0 else float("nan")
 
+
+#%% Generate diversity dataset (imgs_intensity, imgs_modulus, div_phases)
 # Diversity images: |FT(beam * exp(i * alpha/2 * r^2))|^2  (camera / Fourier plane)
 div_phases = []
 imgs_intensity = []
 imgs_modulus = []
-for a, d in zip(alphas, diversity_phase_at_slm_radius):
-    div = 0.5 * a * rr + ldot(beta, L)
+for alpha_phys in alphas_rad_per_m2:
+    div = alpha_phys * rr + ldot(beta, L)
     div_phases.append(div)
     far_field = sft(beam_true * np.exp(1j * div))
     inten = np.abs(far_field) ** 2
     imgs_intensity.append(inten)
     imgs_modulus.append(np.sqrt(inten))
 
-print(f"Dataset: {len(alphas)} diversity images, grid {n}×{n}")
+print(f"Dataset: {len(alphas_rad_per_m2)} diversity images, grid {n}×{n}")
 print(f"SLM size = {n}×{n}, pixel pitch = {slm_pixel_pitch_m*1e6:.2f} um")
 print(f"lambda = {lambda_m*1e9:.1f} nm, f = {f_m*1e3:.1f} mm, flambda = {flambda:.3e} m^2")
 print(f"SLM reference radius = {slm_ref_radius_m*1e3:.3f} mm, beam sigma = {beam_sigma_on_slm_m*1e3:.3f} mm")
 print(f"Beam power inside inscribed pupil: {100.0 * power_inside_frac:.2f}%")
 print(f"# zernike modes = {len(zernike_coeffs)}")
 print(f"Zernike coeffs [rad @ rho=1]: {zernike_coeffs}")
-print(f"Diversity phase [rad @ SLM ref radius]: {diversity_phase_at_slm_radius}  →  alphas [rad/m^2]: {[f'{a:.3e}' for a in alphas]}")
+print(f"alphas [rad/m^2]: {[f'{a:.3e}' for a in alphas_rad_per_m2]}")
+print(f"linear frequencies [cycles/m]: lin_x={lin_x_cpm:.3e}, lin_y={lin_y_cpm:.3e}")
+print(f"beta [rad/m]: beta_x={beta[0]:.3e}, beta_y={beta[1]:.3e}")
 print(f"Beam peak: {amp_true.max():.3f},  phase range: [{phase_true.min():.2f}, {phase_true.max():.2f}] rad")
+
+
+#%% Inspect dataset: imgs_modulus
+# Stop here to compare synthetic modulus images against experimental captures.
+n_preview = min(3, len(imgs_modulus))
+fig_mod, ax_mod = plt.subplots(1, n_preview, figsize=(4 * n_preview, 4))
+if n_preview == 1:
+    ax_mod = [ax_mod]
+
+for i in range(n_preview):
+    ax_mod[i].imshow(imgs_modulus[i], cmap="gray", origin="lower")
+    ax_mod[i].set_title(f"imgs_modulus[{i}]")
+    ax_mod[i].set_xticks([])
+    ax_mod[i].set_yticks([])
+
+fig_mod.tight_layout()
+plt.show()
 
 
 #%% One-Shot initialisation
@@ -178,7 +214,8 @@ print(f"Beam peak: {amp_true.max():.3f},  phase range: [{phase_true.min():.2f}, 
 
 beam_init = one_shot(
     imgs_intensity[-1],
-    alpha=alphas[-1],
+    # one_shot model uses alpha/2 * r^2, while dataset above uses alpha_phys * r^2.
+    alpha=2.0 * alphas_rad_per_m2[-1],
     beta=beta,
     L=L,
     flambda=flambda,

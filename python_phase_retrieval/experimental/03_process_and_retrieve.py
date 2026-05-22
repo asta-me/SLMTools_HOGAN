@@ -51,6 +51,8 @@ verbose = True
 # Retrieval visualization settings.
 save_retrieved_plot = True
 show_retrieved_plot = True
+show_modulus_preview = True
+modulus_preview_max_images = 6
 
 # ROI selection behavior.
 force_manual_selection = False
@@ -357,6 +359,25 @@ for pattern_path in pattern_files:
 
 if not imgs_modulus:
     raise RuntimeError("No non-calibration patterns found for PDGS.")
+
+
+#%% Inspect generated dataset (imgs_modulus) before PDGS
+print(f"Generated dataset: {len(imgs_modulus)} frames")
+print(f"Each modulus frame shape: {imgs_modulus[0].shape}")
+
+if show_modulus_preview:
+    n_show = min(len(imgs_modulus), modulus_preview_max_images)
+    fig, axes = plt.subplots(1, n_show, figsize=(4 * n_show, 4))
+    if n_show == 1:
+        axes = [axes]
+
+    for idx in range(n_show):
+        axes[idx].imshow(imgs_modulus[idx], cmap="gray")
+        axes[idx].set_title(f"|u| #{idx + 1}")
+        axes[idx].axis("off")
+
+    fig.tight_layout()
+    plt.show()
 
 
 #%% Run PDGS
