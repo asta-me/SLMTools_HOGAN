@@ -1,0 +1,27 @@
+{
+  "patterns_dir": "C:\\Users\\astam\\Desktop\\GitHub Repos New\\Personal\\SLMTools_HOGAN\\python_phase_retrieval\\experimental\\output\\patterns_bmp",
+  "captures_dir": "C:\\Users\\astam\\Desktop\\GitHub Repos New\\Personal\\SLMTools_HOGAN\\python_phase_retrieval\\experimental\\output\\captures_tif",
+  "results_dir": "C:\\Users\\astam\\Desktop\\GitHub Repos New\\Personal\\SLMTools_HOGAN\\python_phase_retrieval\\experimental\\output\\results",
+  "calibration_pattern_stem": "calib_rs_frame",
+  "slm_height": 1080,
+  "slm_width": 1080,
+  "pixel_pitch": 8e-06,
+  "nit": 100,
+  "flambda": 1.0,
+  "use_gpu": false,
+  "beam_guess_method": "one_shot",
+  "beam_guess_alpha": 1.0368,
+  "beam_guess_beta": [
+    5153.904027009183,
+    5153.904027009183
+  ],
+  "beam_guess_params_units": "natlat+flambda1",
+  "beam_guess_source_pattern_params_physical": {
+    "alpha_rad_per_m2": 15000000.0,
+    "lin_x_cpm": 3120000.0,
+    "lin_y_cpm": 3120000.0
+  },
+  "subtract_background": true,
+  "background_percentile": 5.0,
+  "roi_config_path": "C:\\Users\\astam\\Desktop\\GitHub Repos New\\Personal\\SLMTools_HOGAN\\python_phase_retrieval\\experimental\\output\\results\\fourier_roi_config.json"
+}
