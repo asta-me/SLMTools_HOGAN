@@ -6,22 +6,99 @@
   "slm_height": 1080,
   "slm_width": 1080,
   "pixel_pitch": 8e-06,
-  "nit": 100,
-  "flambda": 1.0,
+  "nit": 20,
+  "flambda": 5.3200000000000007e-08,
   "use_gpu": false,
   "beam_guess_method": "one_shot",
-  "beam_guess_alpha": 1.0368,
+  "beam_guess_alpha": 36000000.0,
+  "beam_guess_alpha_source_diversity": 18000000.0,
   "beam_guess_beta": [
-    5153.904027009183,
-    5153.904027009183
+    0.0,
+    0.0
   ],
-  "beam_guess_params_units": "natlat+flambda1",
+  "beam_guess_params_units": "SI",
+  "wavelength_m": 5.32e-07,
+  "focal_length_m": 0.1,
+  "save_one_shot_debug": true,
+  "one_shot_metrics": {
+    "edge_energy_fraction_native": 0.01095565914050583,
+    "edge_energy_fraction_fftshift": 0.49026571039698325,
+    "edge_energy_fraction_ifftshift": 0.49026571039698325
+  },
   "beam_guess_source_pattern_params_physical": {
-    "alpha_rad_per_m2": 15000000.0,
+    "alpha_rad_per_m2": 18000000.0,
     "lin_x_cpm": 3120000.0,
     "lin_y_cpm": 3120000.0
   },
+  "center_signal_order": true,
+  "input_fft_shift_mode": "none",
   "subtract_background": true,
   "background_percentile": 5.0,
-  "roi_config_path": "C:\\Users\\astam\\Desktop\\GitHub Repos New\\Personal\\SLMTools_HOGAN\\python_phase_retrieval\\experimental\\output\\results\\fourier_roi_config.json"
+  "enable_sinc_precompensation": true,
+  "pixel_fill_factor": 0.93,
+  "sinc_precomp_floor_mode": "physical_min_nonzero_on_grid",
+  "sinc_precomp_max_gain": 15.0,
+  "sinc_precomp_stats": [
+    {
+      "envelope_intensity_floor_physical": 4.436137868249382e-22,
+      "envelope_intensity_min": 4.436137868249382e-22,
+      "envelope_intensity_max": 3.367339844387247e-08,
+      "gain_min": 15.0,
+      "gain_median": 15.0,
+      "gain_max": 15.0
+    },
+    {
+      "envelope_intensity_floor_physical": 4.436137868249382e-22,
+      "envelope_intensity_min": 4.436137868249382e-22,
+      "envelope_intensity_max": 3.367339844387247e-08,
+      "gain_min": 15.0,
+      "gain_median": 15.0,
+      "gain_max": 15.0
+    },
+    {
+      "envelope_intensity_floor_physical": 4.436137868249382e-22,
+      "envelope_intensity_min": 4.436137868249382e-22,
+      "envelope_intensity_max": 3.367339844387247e-08,
+      "gain_min": 15.0,
+      "gain_median": 15.0,
+      "gain_max": 15.0
+    },
+    {
+      "envelope_intensity_floor_physical": 4.436137868249382e-22,
+      "envelope_intensity_min": 4.436137868249382e-22,
+      "envelope_intensity_max": 3.367339844387247e-08,
+      "gain_min": 15.0,
+      "gain_median": 15.0,
+      "gain_max": 15.0
+    }
+  ],
+  "roi_config_path": "C:\\Users\\astam\\Desktop\\GitHub Repos New\\Personal\\SLMTools_HOGAN\\python_phase_retrieval\\experimental\\output\\results\\fourier_roi_config.json",
+  "processed_pattern_stems": [
+    "a_p004e06_x_p312e04_y_p312e04",
+    "a_p08p667e06_x_p312e04_y_p312e04",
+    "a_p13p333e06_x_p312e04_y_p312e04",
+    "a_p018e06_x_p312e04_y_p312e04"
+  ],
+  "processed_pattern_params_physical": [
+    {
+      "alpha_rad_per_m2": 4000000.0,
+      "lin_x_cpm": 3120000.0,
+      "lin_y_cpm": 3120000.0
+    },
+    {
+      "alpha_rad_per_m2": 8667000.0,
+      "lin_x_cpm": 3120000.0,
+      "lin_y_cpm": 3120000.0
+    },
+    {
+      "alpha_rad_per_m2": 13333000.0,
+      "lin_x_cpm": 3120000.0,
+      "lin_y_cpm": 3120000.0
+    },
+    {
+      "alpha_rad_per_m2": 18000000.0,
+      "lin_x_cpm": 3120000.0,
+      "lin_y_cpm": 3120000.0
+    }
+  ]
 }

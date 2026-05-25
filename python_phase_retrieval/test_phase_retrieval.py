@@ -90,7 +90,7 @@ def zernike_low_order_mix(x: np.ndarray, y: np.ndarray, r_ref: float, coeffs: di
 #%% Dataset parameters
 # Experiment/solver controls.
 n = 1080                       # Grid size (n x n)
-nit = 300                      # Number of iterations
+nit = 100                      # Number of iterations
 progress_every = 25   # Print progress every N iterations
 use_gpu = True        # Set False to force NumPy CPU
 amp_threshold = 0.15    # Threshold for phase RMSE metric (only where amplitude is relevant)

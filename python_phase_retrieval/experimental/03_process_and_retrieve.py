@@ -22,7 +22,6 @@ except Exception as exc:  # pragma: no cover
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from python_phase_retrieval.lattice_utils import natlat
 from python_phase_retrieval.phase_retrieval import one_shot, pdgs_log
 
 
@@ -42,9 +41,13 @@ slm_height = 1080
 slm_width = 1080
 pixel_pitch = 8e-6
 
+# Physical setup used by one_shot/PDGS model.
+wavelength_m = 532e-9
+focal_length_m = 100e-3
+
 # PDGS settings.
 nit = 100
-flambda = 1.0
+flambda = wavelength_m * focal_length_m
 use_gpu = False
 verbose = True
 
@@ -53,6 +56,7 @@ save_retrieved_plot = True
 show_retrieved_plot = True
 show_modulus_preview = True
 modulus_preview_max_images = 6
+save_one_shot_debug = True
 
 # ROI selection behavior.
 force_manual_selection = False
@@ -62,13 +66,27 @@ roi_config_filename = "fourier_roi_config.json"
 subtract_background = True
 background_percentile = 5.0
 
+# FFT/alignment controls for experimental captures.
+# If True, recenter selected first-order patch before resize and set linear term to 0.
+center_signal_order = True
+
+# Optional extra shift on camera data before PDGS (for FFT convention debugging).
+# Allowed values: "none", "fftshift", "ifftshift".
+input_fft_shift_mode = "none"
+
 
 #%% Helpers
 _tag_re = re.compile(r"^([pm])(\d+(?:p\d+)?)e(\d+)$")
 
 
 def _load_gray_image(path: Path) -> np.ndarray:
-    return np.asarray(Image.open(path).convert("L"))
+    arr = np.asarray(Image.open(path))
+    if arr.ndim == 2:
+        return arr
+    if arr.ndim == 3:
+        # Convert color to grayscale while preserving dynamic range.
+        return np.mean(arr.astype(np.float64), axis=2)
+    raise ValueError(f"Unsupported image shape for {path}: {arr.shape}")
 
 
 def _save_gray_image(array: np.ndarray, path: Path) -> None:
@@ -103,37 +121,30 @@ def _parse_pattern_params(stem: str) -> tuple[float, float, float]:
     return alpha, linx, liny
 
 
-def _to_pdgs_params(
-    alpha_rad_per_m2: float,
-    lin_x_cpm: float,
-    lin_y_cpm: float,
-    height: int,
-    width: int,
-    pixel_pitch_m: float,
-) -> tuple[float, float, float]:
-    """Convert physical pattern params to PDGS-native lattice params.
+def _is_target_frame_pattern(stem: str) -> bool:
+    return stem.endswith("_target_frame")
 
-    PDGS in this script runs on natlat + flambda=1, so alpha/beta must be in
-    those normalized coordinates, not in SI units from filename tags.
-    """
-    n_mean = 0.5 * (height + width)
-    alpha_nat = float(alpha_rad_per_m2) * (pixel_pitch_m**2) * n_mean
 
-    # beta components are in (row, col) axis order for ldot(beta, L).
-    beta_row = 2.0 * np.pi * float(lin_y_cpm) * pixel_pitch_m * np.sqrt(height)
-    beta_col = 2.0 * np.pi * float(lin_x_cpm) * pixel_pitch_m * np.sqrt(width)
-    return alpha_nat, beta_row, beta_col
+def _is_calibration_pattern(stem: str) -> bool:
+    return stem == calibration_pattern_stem
+
+
+def _pattern_sort_key(path: Path) -> tuple[float, float, float, str]:
+    # Numeric sort by physical params; fallback to stem for deterministic tie-break.
+    alpha, linx, liny = _parse_pattern_params(path.stem)
+    return (alpha, linx, liny, path.stem)
 
 
 def _build_phase_pdgs(
-    y_nat: np.ndarray,
-    x_nat: np.ndarray,
-    alpha_nat: float,
+    y_m: np.ndarray,
+    x_m: np.ndarray,
+    alpha_rad_per_m2: float,
     beta_row: float,
     beta_col: float,
 ) -> np.ndarray:
-    quadratic = 0.5 * alpha_nat * (y_nat**2 + x_nat**2)
-    linear = beta_row * y_nat + beta_col * x_nat
+    # div_phase uses physical SLM coordinates in meters.
+    quadratic = alpha_rad_per_m2 * (y_m**2 + x_m**2)
+    linear = beta_row * y_m + beta_col * x_m
     return quadratic + linear
 
 
@@ -148,8 +159,14 @@ def _clip_rect_to_shape(rect: tuple[int, int, int, int], shape: tuple[int, int])
 
 
 def _manual_pick_rect(img: np.ndarray, title: str) -> tuple[int, int, int, int]:
+    # Contrast enhancement and gamma correction for better edge visibility
+    img_normalized = img.astype(np.float64)
+    img_normalized = (img_normalized - img_normalized.min()) / (img_normalized.max() - img_normalized.min() + 1e-8)
+    gamma = 0.5
+    img_corrected = np.power(img_normalized, gamma)
+    
     fig, ax = plt.subplots(figsize=(10, 8))
-    ax.imshow(img, cmap="gray")
+    ax.imshow(img_corrected, cmap="gray")
     ax.set_title(title + "\nClick TOP-LEFT then BOTTOM-RIGHT")
     pts = plt.ginput(2, timeout=-1)
     plt.close(fig)
@@ -180,6 +197,39 @@ def _resize_nearest(img: np.ndarray, target_h: int, target_w: int) -> np.ndarray
     row_idx = np.linspace(0, src_h - 1, target_h).astype(int)
     col_idx = np.linspace(0, src_w - 1, target_w).astype(int)
     return img[row_idx][:, col_idx]
+
+
+def _recenter_by_mask(img: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, tuple[int, int]]:
+    weights = np.asarray(img, dtype=np.float64) * np.asarray(mask, dtype=np.float64)
+    ws = float(np.sum(weights))
+
+    if ws > 0.0:
+        yy, xx = np.indices(img.shape, dtype=np.float64)
+        cy = float(np.sum(yy * weights) / ws)
+        cx = float(np.sum(xx * weights) / ws)
+    else:
+        idx = np.argwhere(mask > 0.0)
+        if idx.size == 0:
+            return img, (0, 0)
+        cy, cx = np.mean(idx, axis=0)
+
+    target_y = (img.shape[0] - 1) / 2.0
+    target_x = (img.shape[1] - 1) / 2.0
+    dy = int(round(target_y - cy))
+    dx = int(round(target_x - cx))
+
+    shifted = np.roll(np.roll(img, dy, axis=0), dx, axis=1)
+    return shifted, (dy, dx)
+
+
+def _apply_input_fft_shift(img: np.ndarray, mode: str) -> np.ndarray:
+    if mode == "none":
+        return img
+    if mode == "fftshift":
+        return np.fft.fftshift(img)
+    if mode == "ifftshift":
+        return np.fft.ifftshift(img)
+    raise ValueError(f"Unsupported input_fft_shift_mode: {mode}")
 
 
 def _frame_to_modulus(frame: np.ndarray) -> np.ndarray:
@@ -220,6 +270,54 @@ def _save_retrieved_amplitude_phase_plot(
         plt.close(fig)
 
 
+def _edge_energy_fraction(amplitude: np.ndarray, border_fraction: float = 0.08) -> float:
+    a = np.asarray(amplitude, dtype=np.float64)
+    h, w = a.shape
+    bh = max(1, int(round(h * border_fraction)))
+    bw = max(1, int(round(w * border_fraction)))
+
+    edge = np.zeros_like(a, dtype=bool)
+    edge[:bh, :] = True
+    edge[-bh:, :] = True
+    edge[:, :bw] = True
+    edge[:, -bw:] = True
+
+    total = float(np.sum(a**2))
+    if total <= 0.0:
+        return 0.0
+    return float(np.sum((a[edge]) ** 2) / total)
+
+
+def _save_amplitude_triplet(beam: np.ndarray, out_path: Path) -> dict[str, float]:
+    amp = np.abs(beam)
+    amp_fft = np.abs(np.fft.fftshift(beam))
+    amp_ifft = np.abs(np.fft.ifftshift(beam))
+
+    metrics = {
+        "edge_energy_fraction_native": _edge_energy_fraction(amp),
+        "edge_energy_fraction_fftshift": _edge_energy_fraction(amp_fft),
+        "edge_energy_fraction_ifftshift": _edge_energy_fraction(amp_ifft),
+    }
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    panels = [
+        (amp, "|beam_guess| native"),
+        (amp_fft, "|beam_guess| fftshift"),
+        (amp_ifft, "|beam_guess| ifftshift"),
+    ]
+
+    for ax, (img, title) in zip(axes, panels):
+        im = ax.imshow(img, cmap="gray")
+        ax.set_title(title)
+        ax.axis("off")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    return metrics
+
+
 def _load_or_select_roi_config(calib_img: np.ndarray, config_path: Path) -> dict:
     if config_path.exists() and not force_manual_selection:
         with config_path.open("r", encoding="utf-8") as f:
@@ -228,10 +326,14 @@ def _load_or_select_roi_config(calib_img: np.ndarray, config_path: Path) -> dict
         return cfg
 
     print("Manual ROI selection started")
-    fov_rect = _manual_pick_rect(calib_img, "Select Fourier FOV rectangle")
+    fov_rect = _manual_pick_rect(
+        calib_img,
+        "Select OUTER corners of calibration frame (defines full Fourier FOV)",
+    )
     fov_rect = _clip_rect_to_shape(fov_rect, calib_img.shape)
 
     fov_img = _crop_rect(calib_img, fov_rect)
+
     signal_rect = _manual_pick_rect(fov_img, "Select SIGNAL ROI (e.g. top-left 1st order)")
     signal_rect = _clip_rect_to_shape(signal_rect, fov_img.shape)
 
@@ -260,9 +362,19 @@ captures_dir = captures_dir.resolve()
 results_dir = results_dir.resolve()
 results_dir.mkdir(parents=True, exist_ok=True)
 
-pattern_files = sorted(patterns_dir.glob("*.bmp"))
-if not pattern_files:
+all_pattern_files = list(patterns_dir.glob("*.bmp"))
+if not all_pattern_files:
     raise FileNotFoundError(f"No pattern BMP files found in {patterns_dir}")
+
+pattern_files = [
+    p
+    for p in all_pattern_files
+    if not _is_target_frame_pattern(p.stem) and not _is_calibration_pattern(p.stem)
+]
+pattern_files.sort(key=_pattern_sort_key)
+
+if not pattern_files:
+    raise RuntimeError("No non-calibration patterns found after filtering target-frame files.")
 
 calib_capture = captures_dir / f"{calibration_pattern_stem}.tif"
 if not calib_capture.exists():
@@ -284,9 +396,11 @@ zero_v_rect = tuple(int(v) for v in roi_cfg["zero_v_rect_in_fov"])
 
 
 #%% Build diversity phases and processed modulus stack
-L = natlat((slm_height, slm_width))
-y_nat = L[0].reshape(-1, 1)
-x_nat = L[1].reshape(1, -1)
+y_m_1d = (np.arange(slm_height, dtype=float) - (slm_height - 1) / 2.0) * pixel_pitch
+x_m_1d = (np.arange(slm_width, dtype=float) - (slm_width - 1) / 2.0) * pixel_pitch
+L = (y_m_1d, x_m_1d)
+y_m = L[0].reshape(-1, 1)
+x_m = L[1].reshape(1, -1)
 
 imgs_modulus: list[np.ndarray] = []
 div_phases: list[np.ndarray] = []
@@ -296,27 +410,23 @@ pattern_params_physical: list[tuple[float, float, float]] = []
 saved_debug = False
 
 for pattern_path in pattern_files:
-    # Skip calibration pattern for PDGS stack.
-    if pattern_path.stem == calibration_pattern_stem:
-        continue
-
     capture_path = captures_dir / f"{pattern_path.stem}.tif"
     if not capture_path.exists():
         raise FileNotFoundError(f"Missing capture for pattern {pattern_path.name}: {capture_path}")
 
     alpha_phys, linx_phys, liny_phys = _parse_pattern_params(pattern_path.stem)
-    alpha_nat, beta_row, beta_col = _to_pdgs_params(
-        alpha_rad_per_m2=alpha_phys,
-        lin_x_cpm=linx_phys,
-        lin_y_cpm=liny_phys,
-        height=slm_height,
-        width=slm_width,
-        pixel_pitch_m=pixel_pitch,
-    )
+    # ldot(beta, L) follows (row, col) order => (y, x) in physical SI units.
+    # If signal is recentered in Fourier plane, linear carrier is removed.
+    if center_signal_order:
+        beta_row = 0.0
+        beta_col = 0.0
+    else:
+        beta_row = 2.0 * np.pi * float(liny_phys)
+        beta_col = 2.0 * np.pi * float(linx_phys)
     div_phase = _build_phase_pdgs(
-        y_nat=y_nat,
-        x_nat=x_nat,
-        alpha_nat=alpha_nat,
+        y_m=y_m,
+        x_m=x_m,
+        alpha_rad_per_m2=alpha_phys,
         beta_row=beta_row,
         beta_col=beta_col,
     )
@@ -341,12 +451,18 @@ for pattern_path in pattern_files:
             bg_level = float(np.percentile(signal_pixels, background_percentile))
             masked_fov = np.clip(masked_fov - bg_level * mask, 0.0, None)
 
+    if center_signal_order:
+        masked_fov, recenter_shift = _recenter_by_mask(masked_fov, mask)
+    else:
+        recenter_shift = (0, 0)
+
     resized_img = _resize_nearest(masked_fov, slm_height, slm_width)
+    resized_img = _apply_input_fft_shift(resized_img, input_fft_shift_mode)
 
     imgs_intensity.append(np.clip(resized_img.astype(np.float64), 0.0, None))
     imgs_modulus.append(_frame_to_modulus(resized_img))
     div_phases.append(div_phase)
-    pattern_params.append((alpha_nat, beta_row, beta_col))
+    pattern_params.append((alpha_phys, beta_row, beta_col))
     pattern_params_physical.append((alpha_phys, linx_phys, liny_phys))
 
     if not saved_debug:
@@ -355,6 +471,7 @@ for pattern_path in pattern_files:
         _save_gray_image(mask, results_dir / "debug_combined_mask.png")
         _save_gray_image(masked_fov, results_dir / "debug_masked_fov.png")
         _save_gray_image(resized_img, results_dir / "debug_resized_for_pdgs.png")
+        np.save(results_dir / "debug_recenter_shift_dy_dx.npy", np.array(recenter_shift, dtype=int))
         saved_debug = True
 
 if not imgs_modulus:
@@ -372,8 +489,9 @@ if show_modulus_preview:
         axes = [axes]
 
     for idx in range(n_show):
+        alpha_millions = pattern_params_physical[idx][0] / 1e6
         axes[idx].imshow(imgs_modulus[idx], cmap="gray")
-        axes[idx].set_title(f"|u| #{idx + 1}")
+        axes[idx].set_title(f"|u| #{idx + 1}\nalpha={alpha_millions:g}e6")
         axes[idx].axis("off")
 
     fig.tight_layout()
@@ -385,11 +503,27 @@ if show_modulus_preview:
 alpha_guess, beta_row_guess, beta_col_guess = pattern_params[-1]
 beam_guess = one_shot(
     img_intensity=imgs_intensity[-1],
-    alpha=alpha_guess,
+    # one_shot uses (alpha/2) * r^2 internally, so pass 2*alpha of the
+    # diversity phase to keep consistency with div_phase construction.
+    alpha=2.0 * alpha_guess,
     beta=(beta_row_guess, beta_col_guess),
     L=L,
     flambda=flambda,
 )
+
+one_shot_metrics: dict[str, float] = {}
+if save_one_shot_debug:
+    one_shot_metrics = _save_amplitude_triplet(
+        beam=beam_guess,
+        out_path=results_dir / "one_shot_amplitude_debug.png",
+    )
+    print(
+        "One-shot edge energy fractions "
+        f"(native/fftshift/ifftshift): "
+        f"{one_shot_metrics['edge_energy_fraction_native']:.4f} / "
+        f"{one_shot_metrics['edge_energy_fraction_fftshift']:.4f} / "
+        f"{one_shot_metrics['edge_energy_fraction_ifftshift']:.4f}"
+    )
 
 beam_est, logs = pdgs_log(
     imgs_modulus=imgs_modulus,
@@ -429,17 +563,33 @@ run_summary = {
     "flambda": flambda,
     "use_gpu": use_gpu,
     "beam_guess_method": "one_shot",
-    "beam_guess_alpha": float(alpha_guess),
+    "beam_guess_alpha": float(2.0 * alpha_guess),
+    "beam_guess_alpha_source_diversity": float(alpha_guess),
     "beam_guess_beta": [float(beta_row_guess), float(beta_col_guess)],
-    "beam_guess_params_units": "natlat+flambda1",
+    "beam_guess_params_units": "SI",
+    "wavelength_m": wavelength_m,
+    "focal_length_m": focal_length_m,
+    "save_one_shot_debug": save_one_shot_debug,
+    "one_shot_metrics": one_shot_metrics,
     "beam_guess_source_pattern_params_physical": {
         "alpha_rad_per_m2": float(pattern_params_physical[-1][0]),
         "lin_x_cpm": float(pattern_params_physical[-1][1]),
         "lin_y_cpm": float(pattern_params_physical[-1][2]),
     },
+    "center_signal_order": center_signal_order,
+    "input_fft_shift_mode": input_fft_shift_mode,
     "subtract_background": subtract_background,
     "background_percentile": background_percentile,
     "roi_config_path": str(roi_config_path),
+    "processed_pattern_stems": [p.stem for p in pattern_files],
+    "processed_pattern_params_physical": [
+        {
+            "alpha_rad_per_m2": float(alpha),
+            "lin_x_cpm": float(linx),
+            "lin_y_cpm": float(liny),
+        }
+        for alpha, linx, liny in pattern_params_physical
+    ],
 }
 
 with (results_dir / "processing_run_summary.json").open("w", encoding="utf-8") as f:

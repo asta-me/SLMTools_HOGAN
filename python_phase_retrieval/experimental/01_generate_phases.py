@@ -30,18 +30,20 @@ pixel_pitch = 8*1e-6
 # One phase is generated for each alpha in this list.
 # Units: rad / m^2, because phase term is alpha * (x^2 + y^2).
 # alphas = np.array([0.0, 4.5, 6.0, 12]) * 1e6
-alphas = np.linspace(6, 15, 4) * 1e6
+alphas = np.linspace(4, 18, 4) * 1e6
 
 # Calibration frame parameters (target amplitude in Fourier plane).
-calib_frame_inset_px = 140
-calib_frame_thickness_px = 20
+# Set margin to 0 so the bright frame reaches the target borders.
+calib_frame_outer_margin_px = 0
+# Frame thickness in pixels (choose as needed for robust manual picking).
+calib_frame_thickness_px = 24
 calib_random_seed = 0
 
 
 # Linear spatial frequencies u,v in cycles/m.
 # Linear phase term is: 2*pi*(u*x + v*y).
 u_nyquist = 1.0 / (2.0 * pixel_pitch)
-lin_x_cpm = 0.5 * u_nyquist
+lin_x_cpm = 0.5* u_nyquist
 lin_y_cpm = 0.5 * u_nyquist
 
 
@@ -64,6 +66,12 @@ def _phase_to_uint8_mod_2pi(phase_rad: np.ndarray) -> np.ndarray:
     scaled = wrapped * (255.0 / (2.0 * np.pi))
     return np.round(scaled).astype(np.uint8)
 
+
+def _amplitude_to_uint8(amplitude: np.ndarray) -> np.ndarray:
+    amp = np.asarray(amplitude, dtype=np.float64)
+    amp = np.clip(amp, 0.0, 1.0)
+    return np.round(amp * 255.0).astype(np.uint8)
+
 def _build_phase(
     xx_m: np.ndarray,
     yy_m: np.ndarray,
@@ -76,33 +84,44 @@ def _build_phase(
     return quadratic + linear
 
 
-def _build_calibration_phase_rs(
+def generate_geir(
     height: int,
     width: int,
-    frame_inset_px: int,
+    frame_outer_margin_px: int,
     frame_thickness_px: int,
-    random_seed: int,
 ) -> np.ndarray:
-    # Target amplitude in Fourier plane: rectangular frame.
+    """Return calibration target amplitude (rectangular frame in Fourier plane)."""
     amp_target = np.zeros((height, width), dtype=np.float64)
-    y0 = frame_inset_px
-    x0 = frame_inset_px
-    y1 = height - frame_inset_px
-    x1 = width - frame_inset_px
+    y0 = frame_outer_margin_px
+    x0 = frame_outer_margin_px
+    y1 = height - frame_outer_margin_px
+    x1 = width - frame_outer_margin_px
 
     if y1 <= y0 or x1 <= x0:
-        raise ValueError("Invalid calibration frame inset for selected SLM size")
+        raise ValueError("Invalid calibration frame margin for selected SLM size")
 
     t = frame_thickness_px
+    if t <= 0 or t * 2 >= min(y1 - y0, x1 - x0):
+        raise ValueError("Invalid calibration frame thickness for selected SLM size")
+
     amp_target[y0:y0 + t, x0:x1] = 1.0
     amp_target[y1 - t:y1, x0:x1] = 1.0
     amp_target[y0:y1, x0:x0 + t] = 1.0
     amp_target[y0:y1, x1 - t:x1] = 1.0
 
+    return amp_target
+
+
+def rs_simple(target_amplitude: np.ndarray, random_seed: int) -> np.ndarray:
+    """Return SLM phase from a target amplitude using simple random superposition."""
+    amp_target = np.asarray(target_amplitude, dtype=np.float64)
+    if amp_target.ndim != 2:
+        raise ValueError("target_amplitude must be a 2D array")
+
     # Random superposition (single-shot): assign random phase in Fourier plane,
     # inverse transform, and keep only phase on SLM plane.
     rng = np.random.default_rng(random_seed)
-    random_phase = rng.uniform(0.0, 2.0 * np.pi, size=(height, width))
+    random_phase = rng.uniform(0.0, 2.0 * np.pi, size=amp_target.shape)
     fourier_field = amp_target * np.exp(1j * random_phase)
     slm_field = np.fft.ifft2(np.fft.ifftshift(fourier_field))
     return np.angle(slm_field)
@@ -147,15 +166,26 @@ def _alpha_tag_e06(value: float) -> str:
 output_dir.mkdir(parents=True, exist_ok=True)
 
 if generate_calibration_pattern:
-    calib_phase = _build_calibration_phase_rs(
+    # 1) Build the calibration target frame for Fourier-plane FOV mapping.
+    calib_target = generate_geir(
         slm_height,
         slm_width,
-        frame_inset_px=calib_frame_inset_px,
+        frame_outer_margin_px=calib_frame_outer_margin_px,
         frame_thickness_px=calib_frame_thickness_px,
+    )
+
+    # Save target frame for visualization/debugging.
+    calib_target_name = f"{calibration_name}_target_frame"
+    Image.fromarray(_amplitude_to_uint8(calib_target), mode="L").save(output_dir / f"{calib_target_name}.bmp")
+
+    # 2) Build the RS hologram phase from that target.
+    calib_phase = rs_simple(
+        target_amplitude=calib_target,
         random_seed=calib_random_seed,
     )
     calib_uint8 = _phase_to_uint8_mod_2pi(calib_phase)
     Image.fromarray(calib_uint8, mode="L").save(output_dir / f"{calibration_name}.bmp")
+    print(f"Generated calibration target: {calib_target_name}.bmp")
     print(f"Generated calibration pattern: {calibration_name}.bmp")
 
 xx_m, yy_m = _make_physical_grid(slm_height, slm_width, pixel_pitch)
