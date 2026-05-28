@@ -23,11 +23,10 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-
+# Include parent directory into sys.path, allows for the next import
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from python_phase_retrieval.lattice_utils import ldot, r2, sft
 from python_phase_retrieval.phase_retrieval import one_shot, pdgs_log
 
 #%% Helper functions
@@ -35,6 +34,19 @@ from python_phase_retrieval.phase_retrieval import one_shot, pdgs_log
 def wrap_phase(x: np.ndarray) -> np.ndarray:
     # Wrap any real phase to the principal interval [-pi, pi].
     return np.angle(np.exp(1j * x))
+
+
+def normalize_field_energy(field: np.ndarray) -> np.ndarray:
+    """Normalize a complex field so that sum(|field|^2) = 1."""
+    u = np.asarray(field)
+    energy = float(np.sum(np.abs(u) ** 2))
+    if energy <= 0.0:
+        raise ValueError("Field energy must be positive for normalization")
+    return u / np.sqrt(energy)
+
+def fourier_dir(v: np.ndarray) -> np.ndarray:
+    # Shifted FFT
+    return np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(v)))
 
 def phase_rmse(est: np.ndarray, ref: np.ndarray, mask: np.ndarray | None = None) -> float:
     # Compute wrapped phase RMSE, optionally restricted to a mask.
@@ -88,82 +100,77 @@ def zernike_low_order_mix(x: np.ndarray, y: np.ndarray, r_ref: float, coeffs: di
     return out
 
 #%% Dataset parameters
-# Experiment/solver controls.
-n = 1080                       # Grid size (n x n)
-nit = 100                      # Number of iterations
-progress_every = 25   # Print progress every N iterations
-use_gpu = True        # Set False to force NumPy CPU
-amp_threshold = 0.15    # Threshold for phase RMSE metric (only where amplitude is relevant)
-show_progress = True
-
 # Physical setup (SI units, SLM-plane coordinates).
-lambda_m = 780e-9              # Wavelength [m]
-f_m = 0.500                    # Lens focal length [m]
+lambda_m = 532e-9              # Wavelength [m]
+f_m = 0.100                    # Lens focal length [m]
 flambda = f_m * lambda_m       # Wavelength × focal-length product [m^2]
 slm_pixel_pitch_m = 8.0e-6     # SLM pixel pitch [m]
 beam_sigma_on_slm_m = 0.9e-3   # Gaussian sigma on SLM [m]
 
-# Physical phase-diversity parameters (same style as 01_generate_phases.py).
-# Quadratic term: phi_quad = alpha * (x^2 + y^2), alpha in [rad / m^2].
-alphas_rad_per_m2 = np.linspace(10, 30, 4) * 1e6
+# Experiment/solver controls.
+n = 1080                       # Grid size (n x n)
+nit = 1000                     # Number of iterations
+progress_every = 100           # Print progress every N iterations
+use_gpu = True                 # Set False to force NumPy CPU
+amp_threshold = 0.15           # Relative threshold on normalized intensity for phase RMSE mask
+show_progress = True          # Print iteration logs 
 
-# Linear term from spatial frequencies [cycles / m]: phi_lin = 2*pi*(u*x + v*y).
-u_nyquist_cpm = 1.0 / (2.0 * slm_pixel_pitch_m)
+# Phase-diversity parameters
+# Quadratic term: phi_quad = 0.5 * alpha * (x^2 + y^2), alpha in [rad / m^2].
+alphas = np.linspace(20, 80, 10) * 1e6                                           # [rad/m^2]
+# Linear term : phi_lin = 2*pi*(u*x + v*y).
+u_nyquist_cpm = 1.0 / (2.0 * slm_pixel_pitch_m)         
 lin_x_cpm = -0.5 * u_nyquist_cpm
 lin_y_cpm = -0.5 * u_nyquist_cpm
-
-# ldot(beta, L) uses beta in [rad / m].
-beta = (2.0 * np.pi * lin_x_cpm, 2.0 * np.pi * lin_y_cpm)
-
-
-
-# All phase values below are defined on the SLM plane.
-# Example low-order phase content in rad at rho=1 (rho = r/r_ref).
-# Keep values small to emulate mild but realistic aberrations.
-zernike_coeffs = {
-    "tilt_x": 0.0,
-    "tilt_y": 0.0,
-    "defocus": 0.00,
-    "astig_0": 0.05,
-    "astig_45": -0.0,
-    "coma_x": 0.01,
-    "coma_y": 0.0,
-    "trefoil_x": 0.01,
-    "trefoil_y": 0.0,
-}
+beta = np.array([2.0 * np.pi * lin_x_cpm, 2.0 * np.pi * lin_y_cpm], dtype=float) # [rad/m]
 
 #%% Build SLM ground truth beam
-# Build a Gaussian amplitude and known astigmatic phase on the SLM lattice.
+
+# Gaussian ampl
 coords_1d = (np.arange(n, dtype=float) - n // 2) * slm_pixel_pitch_m
 L = (coords_1d, coords_1d)
-rr = r2(L)           # r^2 array on the lattice
-x = L[0].reshape(-1, 1)
-y = L[1].reshape(1, -1)
+# Explicit 2D coordinate grids (same indexing convention as previous broadcast form).
+x, y = np.meshgrid(coords_1d, coords_1d, indexing="ij")
+rr = x**2 + y**2
+amp_true = np.exp(-rr / (2.0 * beam_sigma_on_slm_m**2))
 
-# Inscribed reference radius on the SLM grid.
-slm_ref_radius_m = float(min(np.max(np.abs(L[0])), np.max(np.abs(L[1]))))
-# amp_true = np.exp(-rr / (2.0 * beam_sigma_on_slm_m**2))
-
-# Rectangular input amplitude centered on the grid.
-rect_height_frac = 0.30
-rect_width_frac = 0.40
-h_box = int(round(n * rect_height_frac))
-w_box = int(round(n * rect_width_frac))
-y0 = (n - h_box) // 2
-x0 = (n - w_box) // 2
-amp_true = np.zeros((n, n), dtype=float)
-amp_true[y0:y0 + h_box, x0:x0 + w_box] = 1.0
+# Rectangular Ampl
+# rect_height_frac = 0.30
+# rect_width_frac = 0.40
+# h_box = int(round(n * rect_height_frac))
+# w_box = int(round(n * rect_width_frac))
+# y0 = (n - h_box) // 2
+# x0 = (n - w_box) // 2
+# amp_true = np.zeros((n, n), dtype=float)
+# amp_true[y0:y0 + h_box, x0:x0 + w_box] = 1.0
 
 # True phase: mixture of low-order Zernike-like modes normalized on SLM reference radius.
 # Phase is evaluated on the whole grid (not just pupil)
+
+# Phase to be recovered
+zernike_coeffs = {
+    "tilt_x": 0.3,      "tilt_y": 0.3,
+    "defocus": 0.40,
+    "astig_0": 0.2,     "astig_45": -0.0,
+    "coma_x": 0.2,      "coma_y": 0.0,
+    "trefoil_x": 0.01,  "trefoil_y": 0.0,
+}
+# Inscribed reference radius on the SLM grid.
+slm_ref_radius_m = float(min(np.max(np.abs(L[0])), np.max(np.abs(L[1]))))
 aberr = zernike_low_order_mix(x, y, r_ref=slm_ref_radius_m, coeffs=zernike_coeffs)
 phase_true = wrap_phase(aberr)
+
+#Complex field at the SLM plane (ground truth to be recovered)
 beam_true = amp_true * np.exp(1j * phase_true)
-rho_pupil = np.sqrt(x**2 + y**2) / slm_ref_radius_m
-inside_pupil = rho_pupil <= 1.0
-power_total = float(np.sum(amp_true**2))
-power_inside = float(np.sum((amp_true**2)[inside_pupil]))
-power_inside_frac = power_inside / power_total if power_total > 0 else float("nan")
+
+# Phase-metric evaluation mask: threshold relative to max intensity.
+intensity_true = amp_true**2
+phase_eval_mask = intensity_true > (amp_threshold * float(np.max(intensity_true)))
+if not np.any(phase_eval_mask):
+    raise ValueError("Phase evaluation mask is empty; lower amp_threshold")
+# Enforce unit energy on the input field: sum(|beam_true|^2) = 1.
+beam_true = normalize_field_energy(beam_true)
+amp_true = np.abs(beam_true)
 
 
 #%% Generate diversity dataset (imgs_intensity, imgs_modulus, div_phases)
@@ -171,37 +178,36 @@ power_inside_frac = power_inside / power_total if power_total > 0 else float("na
 div_phases = []
 imgs_intensity = []
 imgs_modulus = []
-for alpha_phys in alphas_rad_per_m2:
-    div = alpha_phys * rr + ldot(beta, L)
+for alpha in alphas:
+    # Build Diversity Phase
+    div = (alpha / 2.0) * rr + beta[0] * x + beta[1] * y
     div_phases.append(div)
-    far_field = sft(beam_true * np.exp(1j * div))
+    # Measure diversity image
+    far_field = fourier_dir(beam_true * np.exp(1j * div))
     inten = np.abs(far_field) ** 2
-    imgs_intensity.append(inten)
-    imgs_modulus.append(np.sqrt(inten))
+    inten_sum = float(np.sum(inten))
+    if inten_sum <= 0.0:
+        raise ValueError("Diversity intensity energy must be positive")
+    inten = inten / inten_sum           # Normalize each diversity image to sum = 1
+    imgs_intensity.append(inten)        # Diversity image
+    imgs_modulus.append(np.sqrt(inten)) # Diversity Modulus
 
-print(f"Dataset: {len(alphas_rad_per_m2)} diversity images, grid {n}×{n}")
+print(f"Dataset: {len(alphas)} diversity images, grid {n}×{n}")
 print(f"SLM size = {n}×{n}, pixel pitch = {slm_pixel_pitch_m*1e6:.2f} um")
-print(f"lambda = {lambda_m*1e9:.1f} nm, f = {f_m*1e3:.1f} mm, flambda = {flambda:.3e} m^2")
-print(f"SLM reference radius = {slm_ref_radius_m*1e3:.3f} mm, beam sigma = {beam_sigma_on_slm_m*1e3:.3f} mm")
-print(f"Beam power inside inscribed pupil: {100.0 * power_inside_frac:.2f}%")
-print(f"# zernike modes = {len(zernike_coeffs)}")
-print(f"Zernike coeffs [rad @ rho=1]: {zernike_coeffs}")
-print(f"alphas [rad/m^2]: {[f'{a:.3e}' for a in alphas_rad_per_m2]}")
-print(f"linear frequencies [cycles/m]: lin_x={lin_x_cpm:.3e}, lin_y={lin_y_cpm:.3e}")
+print(f"lambda = {lambda_m*1e9:.1f} nm, f = {f_m*1e3:.1f} mm")
+print(f"alphas [rad/m^2]: {[f'{a:.3e}' for a in alphas]}")
 print(f"beta [rad/m]: beta_x={beta[0]:.3e}, beta_y={beta[1]:.3e}")
-print(f"Beam peak: {amp_true.max():.3f},  phase range: [{phase_true.min():.2f}, {phase_true.max():.2f}] rad")
-
 
 #%% Inspect dataset: imgs_modulus
-# Stop here to compare synthetic modulus images against experimental captures.
+#Verify the diversity images look reasonable 
 n_preview = min(3, len(imgs_modulus))
 fig_mod, ax_mod = plt.subplots(1, n_preview, figsize=(4 * n_preview, 4))
 if n_preview == 1:
     ax_mod = [ax_mod]
 
 for i in range(n_preview):
-    ax_mod[i].imshow(imgs_modulus[i], cmap="gray", origin="lower")
-    ax_mod[i].set_title(f"imgs_modulus[{i}]")
+    ax_mod[i].imshow(imgs_intensity[i], cmap="gray", origin="lower")
+    ax_mod[i].set_title(f"imgs_intensity[{i}]")
     ax_mod[i].set_xticks([])
     ax_mod[i].set_yticks([])
 
@@ -210,19 +216,21 @@ plt.show()
 
 
 #%% One-Shot initialisation
-# One-shot gives a fast initial guess before iterative refinement.
-
+# One-shot gives ainitialization for iterative refinement.
+# To be run on the biggest alpha (strongest diversity) for best conditioning.
 beam_init = one_shot(
     imgs_intensity[-1],
-    # one_shot model uses alpha/2 * r^2, while dataset above uses alpha_phys * r^2.
-    alpha=2.0 * alphas_rad_per_m2[-1],
+    alpha = alphas[-1],
     beta=beta,
     L=L,
     flambda=flambda,
 )
-
+# Normalise energy
+beam_init = normalize_field_energy(beam_init)
+# Align global phase of the initial guess to the true phase for a fair RMSE evaluation (remove piston).
 beam_init_aligned = align_global_phase(beam_init, phase_true, weights=amp_true)
-ph_init_err = phase_rmse(np.angle(beam_init_aligned), phase_true, mask=amp_true > amp_threshold)
+# 0-th iteration error
+ph_init_err = phase_rmse(np.angle(beam_init_aligned), phase_true, mask=phase_eval_mask)
 print(f"One-Shot initial phase RMSE: {ph_init_err:.4f} rad")
 
 #%% PDGS iterative refinement
@@ -237,7 +245,7 @@ beam_est, logs = pdgs_log(
     flambda=flambda,
     every=1,
     phase_truth=phase_true,
-    phase_rmse_mask=amp_true > amp_threshold,
+    phase_rmse_mask=phase_eval_mask,
     verbose=show_progress,
     progress_every=progress_every,
     use_gpu=use_gpu,
@@ -246,60 +254,67 @@ beam_est, logs = pdgs_log(
 print(f"PDGS finished: {len(logs)} logged iterations")
 
 #%% Metrics
-# Compare reconstructed amplitude/phase to synthetic ground truth.
-beam_est_aligned = align_global_phase(beam_est, phase_true, weights=amp_true) # Remove global piston before comparison.
-phase_est = np.angle(beam_est_aligned)
-amp_est = np.abs(beam_est_aligned)
+# Align global phase of the initial guess to the true phase for a fair RMSE evaluation (remove piston).
+beam_est_aligned = align_global_phase(beam_est, phase_true, weights=amp_true) 
+#Normalise Energy of the final estimate (should be close to 1 but just in case).
+beam_est_aligned = normalize_field_energy(beam_est_aligned)
+
+phase_est = np.angle(beam_est_aligned) # Estimated phase (wrapped to [-pi, pi])
+amp_est = np.abs(beam_est_aligned)     # Estimated amplitude 
 
 # Root mean square error on amplitude
 amp_err = float(np.sqrt(np.mean((amp_est - amp_true) ** 2)))
 # Root mean square error on phase (only where amplitude is relevant)
-ph_err = phase_rmse(phase_est, phase_true, mask=amp_true > amp_threshold)
+ph_err = phase_rmse(phase_est, phase_true, mask=phase_eval_mask)
 
 print(f"Final amplitude RMSE    : {amp_err:.6f}")
 print(f"Final phase RMSE (masked): {ph_err:.6f} rad  (one-shot was {ph_init_err:.4f} rad)")
 
 
-#%% Convergence plot
-# Visual-only convergence diagnostics.
+#%% Convergence metrics (separate linear plots)
+# Plot each metric on its own axis because their characteristic scales differ.
 
 iters = np.array([x.iteration for x in logs], dtype=int)
 e_sc  = np.array([x.self_consistency_error for x in logs], dtype=float)
 e_upd = np.array([x.mean_update_norm for x in logs], dtype=float)
 e_gt  = np.array([x.ground_truth_phase_rmse for x in logs], dtype=float)
-fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+has_gt = np.any(np.isfinite(e_gt))
+nrows = 3 if has_gt else 2
+fig, axes = plt.subplots(nrows, 1, figsize=(10, 3.2 * nrows), sharex=True)
+if nrows == 2:
+    ax_sc, ax_upd = axes
+    ax_gt = None
+else:
+    ax_sc, ax_upd, ax_gt = axes
 
-axes[0].plot(iters, e_sc,  label="self_consistency_error")
-axes[0].plot(iters, e_upd, label="mean_update_norm")
-if np.any(np.isfinite(e_gt)):
-    axes[0].plot(iters, e_gt, label="gt_phase_rmse [rad]")
-axes[0].set_xlabel("iteration")
-axes[0].set_ylabel("error")
-axes[0].set_title("Convergence — linear scale")
-axes[0].legend()
-axes[0].grid(True, alpha=0.3)
+ax_sc.plot(iters, e_sc, color="tab:blue")
+ax_sc.set_ylabel("MSE")
+ax_sc.set_title("Self-consistency error")
+ax_sc.grid(True, alpha=0.3)
 
-eps = 1e-14
-axes[1].semilogy(iters, np.maximum(e_sc, eps),  label="self_consistency_error")
-axes[1].semilogy(iters, np.maximum(e_upd, eps), label="mean_update_norm")
-if np.any(np.isfinite(e_gt)):
-    axes[1].semilogy(iters, np.maximum(np.nan_to_num(e_gt, nan=np.inf), eps), label="gt_phase_rmse [rad]")
-axes[1].set_xlabel("iteration")
-axes[1].set_ylabel("error")
-axes[1].set_title("Convergence — log scale")
-axes[1].legend()
-axes[1].grid(True, alpha=0.3)
+ax_upd.plot(iters, e_upd, color="tab:orange")
+ax_upd.set_ylabel("RMS")
+ax_upd.set_title("Mean update norm")
+ax_upd.grid(True, alpha=0.3)
+
+if has_gt and ax_gt is not None:
+    ax_gt.plot(iters, e_gt, color="tab:green")
+    ax_gt.set_ylabel("rad")
+    ax_gt.set_title("Ground-truth phase RMSE")
+    ax_gt.grid(True, alpha=0.3)
+    ax_gt.set_xlabel("iteration")
+else:
+    ax_upd.set_xlabel("iteration")
 
 fig.tight_layout()
 plt.show()
-
 
 #%% Phase diagnostics plot
 # Visual-only phase comparison.
 
 fig2, ax = plt.subplots(1, 3, figsize=(13, 4))
 
-im0 = ax[0].imshow(phase_true, cmap="twilight", origin="lower")
+im0 = ax[0].imshow(phase_true, cmap="twilight", origin="lower", vmin=-np.pi, vmax=np.pi)
 ax[0].set_title("True phase")
 plt.colorbar(im0, ax=ax[0], fraction=0.046, pad=0.04)
 
@@ -321,4 +336,30 @@ fig2.suptitle(
     fontsize=11,
 )
 fig2.tight_layout()
+plt.show()
+
+#%% Amplitude diagnostics plot
+# Visual comparison between true and reconstructed amplitude.
+fig3, ax3 = plt.subplots(1, 3, figsize=(13, 4))
+
+im_a0 = ax3[0].imshow(amp_true, cmap="gray", origin="lower")
+ax3[0].set_title("True amplitude")
+plt.colorbar(im_a0, ax=ax3[0], fraction=0.046, pad=0.04)
+
+im_a1 = ax3[1].imshow(amp_est, cmap="gray", origin="lower")
+ax3[1].set_title("Estimated amplitude")
+plt.colorbar(im_a1, ax=ax3[1], fraction=0.046, pad=0.04)
+
+amp_diff = amp_est - amp_true
+vmax = np.max(np.abs(amp_diff)) if np.max(np.abs(amp_diff)) > 0 else 1.0
+im_a2 = ax3[2].imshow(amp_diff, cmap="coolwarm", origin="lower", vmin=-vmax, vmax=vmax)
+ax3[2].set_title("Amplitude error (est - true)")
+plt.colorbar(im_a2, ax=ax3[2], fraction=0.046, pad=0.04)
+
+for a in ax3:
+    a.set_xticks([])
+    a.set_yticks([])
+
+fig3.suptitle(f"Amplitude RMSE: {amp_err:.6f}", fontsize=11)
+fig3.tight_layout()
 plt.show()

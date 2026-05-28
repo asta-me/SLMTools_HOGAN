@@ -1,42 +1,25 @@
 """Manual Fourier-plane masking and PDGS retrieval."""
-#%%
+#%% Imports
 from __future__ import annotations
 
 import json
 from pathlib import Path
 import re
 import sys
-
 import numpy as np
 
-try:
-    from PIL import Image
-except Exception as exc:  # pragma: no cover
-    raise ImportError("Pillow is required to load images. Install with: pip install Pillow") from exc
+from PIL import Image
 
-try:
-    import matplotlib.pyplot as plt
-except Exception as exc:  # pragma: no cover
-    raise ImportError("Matplotlib is required for manual ROI selection. Install with: pip install matplotlib") from exc
+import matplotlib.pyplot as plt
 
+# Add parent directory to path for imports (Allows the next import to work)
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[2]))
-
 from python_phase_retrieval.phase_retrieval import one_shot, pdgs_log
 
 
 #%% Configuration
-EXPERIMENT_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = EXPERIMENT_DIR / "output"
-
-patterns_dir = OUTPUT_DIR / "patterns_bmp"
-captures_dir = OUTPUT_DIR / "captures_tif"
-results_dir = OUTPUT_DIR / "results"
-
-# Calibration capture name created by 01_generate_phases.py.
-calibration_pattern_stem = "calib_rs_frame"
-
-# SLM dimensions used by PDGS.
+# SLM dimensions used by PDGS.1
 slm_height = 1080
 slm_width = 1080
 pixel_pitch = 8e-6
@@ -46,10 +29,20 @@ wavelength_m = 532e-9
 focal_length_m = 100e-3
 
 # PDGS settings.
-nit = 100
-flambda = wavelength_m * focal_length_m
-use_gpu = False
-verbose = True
+nit = 100                               # Number of iterations for PDGS retrieval.
+flambda = wavelength_m * focal_length_m # Fresnel number parameter for PDGS propagation.
+use_gpu = False                         # GPU Flag
+verbose = True                          # Verbose logging for PDGS iterations (slows down execution)
+
+#Define working directory and paths for patterns, captures, and results.
+experiment_directory = Path(__file__).resolve().parent
+output_dir = experiment_directory / "output"
+patterns_dir = output_dir / "patterns_bmp"
+captures_dir = output_dir / "captures_tif"
+results_dir = output_dir / "results"
+
+# Calibration capture name created by 01_generate_phases.py.
+calibration_pattern_stem = "calib_rs_frame"
 
 # Retrieval visualization settings.
 save_retrieved_plot = True
@@ -318,13 +311,7 @@ def _save_amplitude_triplet(beam: np.ndarray, out_path: Path) -> dict[str, float
     return metrics
 
 
-def _load_or_select_roi_config(calib_img: np.ndarray, config_path: Path) -> dict:
-    if config_path.exists() and not force_manual_selection:
-        with config_path.open("r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        print(f"Loaded ROI config from: {config_path}")
-        return cfg
-
+def _manual_select_roi_config(calib_img: np.ndarray, config_path: Path) -> dict:
     print("Manual ROI selection started")
     fov_rect = _manual_pick_rect(
         calib_img,
@@ -360,22 +347,26 @@ def _load_or_select_roi_config(calib_img: np.ndarray, config_path: Path) -> dict
 patterns_dir = patterns_dir.resolve()
 captures_dir = captures_dir.resolve()
 results_dir = results_dir.resolve()
+# Create results directory if it doesn't exist.
 results_dir.mkdir(parents=True, exist_ok=True)
 
+# Get all pattern BMP files, identify calibration and diversity patterns, and sort them by parameters.
 all_pattern_files = list(patterns_dir.glob("*.bmp"))
 if not all_pattern_files:
     raise FileNotFoundError(f"No pattern BMP files found in {patterns_dir}")
-
+# Filter out target frame patterns and calibration pattern, keeping only diversity patterns for processing.
 pattern_files = [
     p
     for p in all_pattern_files
     if not _is_target_frame_pattern(p.stem) and not _is_calibration_pattern(p.stem)
 ]
+# Sort diversity patterns by their encoded physical parameters (alpha, lin_x, lin_y).
 pattern_files.sort(key=_pattern_sort_key)
-
+# Check
 if not pattern_files:
     raise RuntimeError("No non-calibration patterns found after filtering target-frame files.")
 
+# Check for calibration capture existence (required for ROI selection and PDGS).
 calib_capture = captures_dir / f"{calibration_pattern_stem}.tif"
 if not calib_capture.exists():
     raise FileNotFoundError(
@@ -383,11 +374,15 @@ if not calib_capture.exists():
         "Generate/acquire calibration pattern first."
     )
 
-
 #%% Manual ROI selection or reuse saved config
 calib_img = _load_gray_image(calib_capture)
 roi_config_path = results_dir / roi_config_filename
-roi_cfg = _load_or_select_roi_config(calib_img, roi_config_path)
+if force_manual_selection:
+    roi_cfg = _manual_select_roi_config(calib_img, roi_config_path)
+else:
+    with roi_config_path.open("r", encoding="utf-8") as f:
+        roi_cfg = json.load(f)
+    print(f"Loaded ROI config from: {roi_config_path}")
 
 fov_rect = tuple(int(v) for v in roi_cfg["fov_rect"])
 signal_rect = tuple(int(v) for v in roi_cfg["signal_rect_in_fov"])
@@ -499,6 +494,7 @@ if show_modulus_preview:
 
 
 #%% Run PDGS
+
 # Match simulation setup: initialize from one-shot using the last diversity image.
 alpha_guess, beta_row_guess, beta_col_guess = pattern_params[-1]
 beam_guess = one_shot(

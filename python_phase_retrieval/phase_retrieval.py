@@ -69,11 +69,11 @@ def one_shot(img_intensity, alpha, beta, L, flambda):
     X_minus_xc_sq = r2(dL) - 2.0 * ldot(xc, dL) + float(np.sum(xc**2))
     dual_div_phase = - (4.0 * np.pi**2) * X_minus_xc_sq / (2.0 * alpha * flambda**2)
 
+    # Il modulo del campo è la radice dell'intensità misurata (clip if < 0)
     mod = np.sqrt(np.clip(np.asarray(img_intensity, dtype=float), 0.0, None))
     
     # ISFT trasporta il campo dalla Fotocamera (dL) all'SLM (L)
     return isft(mod * np.exp(1j * dual_div_phase)) * np.exp(-1j * div_phase)
-
 
 def pdgs_iter(guess, phis, mods, xp, return_updates=False):
     new_guess = xp.zeros_like(guess)
