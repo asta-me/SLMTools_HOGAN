@@ -66,7 +66,7 @@ def _build_phase(
     lin_y_cpm: float,
 ) -> np.ndarray:
     """Build a quadratic + linear phase pattern from given parameters."""
-    quadratic = alpha_rad_per_m2 * (xx_m**2 + yy_m**2)
+    quadratic = (alpha_rad_per_m2 / 2.0) * (xx_m**2 + yy_m**2)
     linear = 2.0 * np.pi * (lin_x_cpm * xx_m + lin_y_cpm * yy_m)
     return quadratic + linear
 
@@ -100,7 +100,7 @@ def rs_simple(target_amplitude: np.ndarray) -> np.ndarray:
 def _sortable_tag(value: float, digits: int = 3, exp_width: int = 2) -> str:
     """Convert a float value to a sortable string tag."""
     if value == 0:
-        return f"p{'0' * digits}e{'0' * exp_width}"
+        return f"p0p{'0' * (digits - 1)}e{'0' * exp_width}"
 
     prefix = "p" if value > 0 else "m"
     abs_value = abs(value)
@@ -115,7 +115,10 @@ def _sortable_tag(value: float, digits: int = 3, exp_width: int = 2) -> str:
     if exponent < 0:
         raise ValueError(f"Negative exponent not supported in file tag for value {value}")
 
-    return f"{prefix}{scaled:0{digits}d}e{exponent:0{exp_width}d}"
+    # Keep lexical sortability while making mantissa explicit (e.g. p3p12e04).
+    scaled_str = f"{scaled:0{digits}d}"
+    mantissa_tag = f"{scaled_str[0]}p{scaled_str[1:]}"
+    return f"{prefix}{mantissa_tag}e{exponent:0{exp_width}d}"
 
 def _alpha_tag_e06(value: float) -> str:
     """Convert a float value to a sortable string tag with e06 exponent."""

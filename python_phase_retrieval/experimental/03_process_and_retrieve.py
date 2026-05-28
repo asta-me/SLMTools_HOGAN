@@ -29,10 +29,11 @@ wavelength_m = 532e-9
 focal_length_m = 100e-3
 
 # PDGS settings.
-nit = 100                               # Number of iterations for PDGS retrieval.
+nit = 5000                              # Number of iterations for PDGS retrieval.
 flambda = wavelength_m * focal_length_m # Fresnel number parameter for PDGS propagation.
-use_gpu = False                         # GPU Flag
+use_gpu = True                          # GPU Flag
 verbose = True                          # Verbose logging for PDGS iterations (slows down execution)
+progress_every = 100                    # Print progress every N iterations
 
 #Define working directory and paths for patterns, captures, and results.
 experiment_directory = Path(__file__).resolve().parent
@@ -47,9 +48,8 @@ calibration_pattern_stem = "calib_rs_frame"
 # Retrieval visualization settings.
 save_retrieved_plot = True
 show_retrieved_plot = True
-show_modulus_preview = True
-modulus_preview_max_images = 6
-save_one_shot_debug = True
+save_convergence_plot = True
+show_convergence_plot = True
 
 # ROI selection behavior.
 force_manual_selection = False
@@ -61,11 +61,14 @@ background_percentile = 5.0
 
 # FFT/alignment controls for experimental captures.
 # If True, recenter selected first-order patch before resize and set linear term to 0.
-center_signal_order = True
+center_signal_order = False 
 
-# Optional extra shift on camera data before PDGS (for FFT convention debugging).
-# Allowed values: "none", "fftshift", "ifftshift".
-input_fft_shift_mode = "none"
+# Camera-to-model orientation alignment.
+# Enable these once if camera axes are mirrored w.r.t. simulation/model convention.
+camera_flip_ud = True
+camera_flip_lr = True
+
+
 
 
 #%% Helpers
@@ -82,12 +85,6 @@ def _load_gray_image(path: Path) -> np.ndarray:
     raise ValueError(f"Unsupported image shape for {path}: {arr.shape}")
 
 
-def _save_gray_image(array: np.ndarray, path: Path) -> None:
-    arr = np.asarray(array, dtype=np.float64)
-    vmax = arr.max()
-    if vmax > 0:
-        arr = np.clip(arr / vmax * 255.0, 0, 255)
-    Image.fromarray(arr.astype(np.uint8), mode="L").save(path)
 
 
 def _parse_tag(tag: str) -> float:
@@ -102,6 +99,29 @@ def _parse_tag(tag: str) -> float:
     return value
 
 
+def _parse_sortable_tag(tag: str, digits: int = 3) -> float:
+    """Parse tags produced by 01 _sortable_tag, including legacy integer mantissas.
+
+    Legacy linear tags like p312e04 encode 3.12e04 (not 312e04).
+    Newer tags with explicit decimal marker (e.g. p3p12e04) are also supported.
+    """
+    m = _tag_re.match(tag)
+    if m is None:
+        raise ValueError(f"Invalid sortable tag format: {tag}")
+
+    sign, number, exponent = m.groups()
+    if "p" in number:
+        mantissa = float(number.replace("p", "."))
+    else:
+        # Backward-compatibility for legacy tags from _sortable_tag in 01.
+        mantissa = float(number) / (10 ** (digits - 1))
+
+    value = mantissa * (10 ** int(exponent))
+    if sign == "m":
+        value = -value
+    return value
+
+
 def _parse_pattern_params(stem: str) -> tuple[float, float, float]:
     # Expected: a_<alpha_tag>_x_<linx_tag>_y_<liny_tag>
     parts = stem.split("_")
@@ -109,8 +129,8 @@ def _parse_pattern_params(stem: str) -> tuple[float, float, float]:
         raise ValueError(f"Unexpected pattern filename stem: {stem}")
 
     alpha = _parse_tag(parts[1])
-    linx = _parse_tag(parts[3])
-    liny = _parse_tag(parts[5])
+    linx = _parse_sortable_tag(parts[3])
+    liny = _parse_sortable_tag(parts[5])
     return alpha, linx, liny
 
 
@@ -135,8 +155,10 @@ def _build_phase_pdgs(
     beta_row: float,
     beta_col: float,
 ) -> np.ndarray:
-    # div_phase uses physical SLM coordinates in meters.
-    quadratic = alpha_rad_per_m2 * (y_m**2 + x_m**2)
+    # Consistent with one_shot convention: div = (alpha/2)*r^2 + beta·x.
+    quadratic = (alpha_rad_per_m2 / 2.0) * (y_m**2 + x_m**2)
+    #TEMPORARY
+    quadratic = (alpha_rad_per_m2 ) * (y_m**2 + x_m**2)
     linear = beta_row * y_m + beta_col * x_m
     return quadratic + linear
 
@@ -215,23 +237,62 @@ def _recenter_by_mask(img: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, tu
     return shifted, (dy, dx)
 
 
-def _apply_input_fft_shift(img: np.ndarray, mode: str) -> np.ndarray:
-    if mode == "none":
-        return img
-    if mode == "fftshift":
-        return np.fft.fftshift(img)
-    if mode == "ifftshift":
-        return np.fft.ifftshift(img)
-    raise ValueError(f"Unsupported input_fft_shift_mode: {mode}")
 
 
-def _frame_to_modulus(frame: np.ndarray) -> np.ndarray:
-    intensity = frame.astype(np.float64)
-    modulus = np.sqrt(np.clip(intensity, 0.0, None))
-    mx = modulus.max()
-    if mx > 0:
-        modulus = modulus / mx
-    return modulus
+def _normalize_field_energy(field: np.ndarray) -> np.ndarray:
+    """Normalize a complex field so that sum(|field|^2) = 1."""
+    u = np.asarray(field)
+    energy = float(np.sum(np.abs(u) ** 2))
+    if energy <= 0.0:
+        raise ValueError("Field energy must be positive for normalization")
+    return u / np.sqrt(energy)
+
+
+def _save_convergence_metrics_plot(
+    logs: list,
+    out_path: Path,
+    show_plot: bool,
+) -> None:
+    iters = np.array([entry.iteration for entry in logs], dtype=int)
+    e_sc = np.array([entry.self_consistency_error for entry in logs], dtype=float)
+    e_upd = np.array([entry.mean_update_norm for entry in logs], dtype=float)
+    e_gt = np.array([entry.ground_truth_phase_rmse for entry in logs], dtype=float)
+
+    has_gt = np.any(np.isfinite(e_gt))
+    nrows = 3 if has_gt else 2
+    fig, axes = plt.subplots(nrows, 1, figsize=(10, 3.2 * nrows), sharex=True)
+
+    if nrows == 2:
+        ax_sc, ax_upd = axes
+        ax_gt = None
+    else:
+        ax_sc, ax_upd, ax_gt = axes
+
+    ax_sc.plot(iters, e_sc, color="tab:blue")
+    ax_sc.set_ylabel("MSE")
+    ax_sc.set_title("Self-consistency error")
+    ax_sc.grid(True, alpha=0.3)
+
+    ax_upd.plot(iters, e_upd, color="tab:orange")
+    ax_upd.set_ylabel("RMS")
+    ax_upd.set_title("Mean update norm")
+    ax_upd.grid(True, alpha=0.3)
+
+    if has_gt and ax_gt is not None:
+        ax_gt.plot(iters, e_gt, color="tab:green")
+        ax_gt.set_ylabel("rad")
+        ax_gt.set_title("Ground-truth phase RMSE")
+        ax_gt.grid(True, alpha=0.3)
+        ax_gt.set_xlabel("iteration")
+    else:
+        ax_upd.set_xlabel("iteration")
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def _save_retrieved_amplitude_phase_plot(
@@ -263,52 +324,6 @@ def _save_retrieved_amplitude_phase_plot(
         plt.close(fig)
 
 
-def _edge_energy_fraction(amplitude: np.ndarray, border_fraction: float = 0.08) -> float:
-    a = np.asarray(amplitude, dtype=np.float64)
-    h, w = a.shape
-    bh = max(1, int(round(h * border_fraction)))
-    bw = max(1, int(round(w * border_fraction)))
-
-    edge = np.zeros_like(a, dtype=bool)
-    edge[:bh, :] = True
-    edge[-bh:, :] = True
-    edge[:, :bw] = True
-    edge[:, -bw:] = True
-
-    total = float(np.sum(a**2))
-    if total <= 0.0:
-        return 0.0
-    return float(np.sum((a[edge]) ** 2) / total)
-
-
-def _save_amplitude_triplet(beam: np.ndarray, out_path: Path) -> dict[str, float]:
-    amp = np.abs(beam)
-    amp_fft = np.abs(np.fft.fftshift(beam))
-    amp_ifft = np.abs(np.fft.ifftshift(beam))
-
-    metrics = {
-        "edge_energy_fraction_native": _edge_energy_fraction(amp),
-        "edge_energy_fraction_fftshift": _edge_energy_fraction(amp_fft),
-        "edge_energy_fraction_ifftshift": _edge_energy_fraction(amp_ifft),
-    }
-
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
-    panels = [
-        (amp, "|beam_guess| native"),
-        (amp_fft, "|beam_guess| fftshift"),
-        (amp_ifft, "|beam_guess| ifftshift"),
-    ]
-
-    for ax, (img, title) in zip(axes, panels):
-        im = ax.imshow(img, cmap="gray")
-        ax.set_title(title)
-        ax.axis("off")
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    return metrics
 
 
 def _manual_select_roi_config(calib_img: np.ndarray, config_path: Path) -> dict:
@@ -394,15 +409,18 @@ zero_v_rect = tuple(int(v) for v in roi_cfg["zero_v_rect_in_fov"])
 y_m_1d = (np.arange(slm_height, dtype=float) - (slm_height - 1) / 2.0) * pixel_pitch
 x_m_1d = (np.arange(slm_width, dtype=float) - (slm_width - 1) / 2.0) * pixel_pitch
 L = (y_m_1d, x_m_1d)
-y_m = L[0].reshape(-1, 1)
-x_m = L[1].reshape(1, -1)
+y_m, x_m = np.meshgrid(y_m_1d, x_m_1d, indexing="ij")
 
 imgs_modulus: list[np.ndarray] = []
 div_phases: list[np.ndarray] = []
 imgs_intensity: list[np.ndarray] = []
 pattern_params: list[tuple[float, float, float]] = []
 pattern_params_physical: list[tuple[float, float, float]] = []
-saved_debug = False
+
+print(
+    "Camera flips (ud, lr): "
+    f"({camera_flip_ud}, {camera_flip_lr})"
+)
 
 for pattern_path in pattern_files:
     capture_path = captures_dir / f"{pattern_path.stem}.tif"
@@ -446,51 +464,46 @@ for pattern_path in pattern_files:
             bg_level = float(np.percentile(signal_pixels, background_percentile))
             masked_fov = np.clip(masked_fov - bg_level * mask, 0.0, None)
 
+    if camera_flip_ud:
+        masked_fov = np.flipud(masked_fov)
+    if camera_flip_lr:
+        masked_fov = np.fliplr(masked_fov)
+
     if center_signal_order:
-        masked_fov, recenter_shift = _recenter_by_mask(masked_fov, mask)
-    else:
-        recenter_shift = (0, 0)
+        masked_fov, _ = _recenter_by_mask(masked_fov, mask)
 
     resized_img = _resize_nearest(masked_fov, slm_height, slm_width)
-    resized_img = _apply_input_fft_shift(resized_img, input_fft_shift_mode)
 
-    imgs_intensity.append(np.clip(resized_img.astype(np.float64), 0.0, None))
-    imgs_modulus.append(_frame_to_modulus(resized_img))
+    intensity = np.clip(resized_img.astype(np.float64), 0.0, None)
+    intensity_sum = float(np.sum(intensity))
+    if intensity_sum <= 0.0:
+        raise ValueError(f"Zero-energy processed frame for pattern {pattern_path.stem}")
+    intensity = intensity / intensity_sum
+
+    imgs_intensity.append(intensity)
+    imgs_modulus.append(np.sqrt(intensity))
     div_phases.append(div_phase)
     pattern_params.append((alpha_phys, beta_row, beta_col))
     pattern_params_physical.append((alpha_phys, linx_phys, liny_phys))
-
-    if not saved_debug:
-        _save_gray_image(raw_img, results_dir / "debug_raw_capture.png")
-        _save_gray_image(fov_img, results_dir / "debug_fov_crop.png")
-        _save_gray_image(mask, results_dir / "debug_combined_mask.png")
-        _save_gray_image(masked_fov, results_dir / "debug_masked_fov.png")
-        _save_gray_image(resized_img, results_dir / "debug_resized_for_pdgs.png")
-        np.save(results_dir / "debug_recenter_shift_dy_dx.npy", np.array(recenter_shift, dtype=int))
-        saved_debug = True
 
 if not imgs_modulus:
     raise RuntimeError("No non-calibration patterns found for PDGS.")
 
 
 #%% Inspect generated dataset (imgs_modulus) before PDGS
-print(f"Generated dataset: {len(imgs_modulus)} frames")
-print(f"Each modulus frame shape: {imgs_modulus[0].shape}")
+print(f"Generated dataset: {len(imgs_modulus)} frames, shape: {imgs_modulus[0].shape}")
 
-if show_modulus_preview:
-    n_show = min(len(imgs_modulus), modulus_preview_max_images)
-    fig, axes = plt.subplots(1, n_show, figsize=(4 * n_show, 4))
-    if n_show == 1:
-        axes = [axes]
-
-    for idx in range(n_show):
-        alpha_millions = pattern_params_physical[idx][0] / 1e6
-        axes[idx].imshow(imgs_modulus[idx], cmap="gray")
-        axes[idx].set_title(f"|u| #{idx + 1}\nalpha={alpha_millions:g}e6")
-        axes[idx].axis("off")
-
-    fig.tight_layout()
-    plt.show()
+n_show = min(len(imgs_modulus), 6)
+fig, axes = plt.subplots(1, n_show, figsize=(4 * n_show, 4))
+if n_show == 1:
+    axes = [axes]
+for idx in range(n_show):
+    alpha_millions = pattern_params_physical[idx][0] / 1e6
+    axes[idx].imshow(imgs_modulus[idx], cmap="gray")
+    axes[idx].set_title(f"|u| #{idx + 1}\nalpha={alpha_millions:g}e6")
+    axes[idx].axis("off")
+fig.tight_layout()
+plt.show()
 
 
 #%% Run PDGS
@@ -499,27 +512,12 @@ if show_modulus_preview:
 alpha_guess, beta_row_guess, beta_col_guess = pattern_params[-1]
 beam_guess = one_shot(
     img_intensity=imgs_intensity[-1],
-    # one_shot uses (alpha/2) * r^2 internally, so pass 2*alpha of the
-    # diversity phase to keep consistency with div_phase construction.
-    alpha=2.0 * alpha_guess,
+    alpha=alpha_guess,
     beta=(beta_row_guess, beta_col_guess),
     L=L,
     flambda=flambda,
 )
-
-one_shot_metrics: dict[str, float] = {}
-if save_one_shot_debug:
-    one_shot_metrics = _save_amplitude_triplet(
-        beam=beam_guess,
-        out_path=results_dir / "one_shot_amplitude_debug.png",
-    )
-    print(
-        "One-shot edge energy fractions "
-        f"(native/fftshift/ifftshift): "
-        f"{one_shot_metrics['edge_energy_fraction_native']:.4f} / "
-        f"{one_shot_metrics['edge_energy_fraction_fftshift']:.4f} / "
-        f"{one_shot_metrics['edge_energy_fraction_ifftshift']:.4f}"
-    )
+beam_guess = _normalize_field_energy(beam_guess)
 
 beam_est, logs = pdgs_log(
     imgs_modulus=imgs_modulus,
@@ -529,8 +527,17 @@ beam_est, logs = pdgs_log(
     L=L,
     flambda=flambda,
     verbose=verbose,
+    progress_every=progress_every,
     use_gpu=use_gpu,
 )
+beam_est = _normalize_field_energy(beam_est)
+
+if save_convergence_plot:
+    _save_convergence_metrics_plot(
+        logs=logs,
+        out_path=results_dir / "convergence_metrics.png",
+        show_plot=show_convergence_plot,
+    )
 
 
 #%% Save outputs
@@ -559,21 +566,19 @@ run_summary = {
     "flambda": flambda,
     "use_gpu": use_gpu,
     "beam_guess_method": "one_shot",
-    "beam_guess_alpha": float(2.0 * alpha_guess),
-    "beam_guess_alpha_source_diversity": float(alpha_guess),
+    "beam_guess_alpha": float(alpha_guess),
     "beam_guess_beta": [float(beta_row_guess), float(beta_col_guess)],
     "beam_guess_params_units": "SI",
     "wavelength_m": wavelength_m,
     "focal_length_m": focal_length_m,
-    "save_one_shot_debug": save_one_shot_debug,
-    "one_shot_metrics": one_shot_metrics,
     "beam_guess_source_pattern_params_physical": {
         "alpha_rad_per_m2": float(pattern_params_physical[-1][0]),
         "lin_x_cpm": float(pattern_params_physical[-1][1]),
         "lin_y_cpm": float(pattern_params_physical[-1][2]),
     },
     "center_signal_order": center_signal_order,
-    "input_fft_shift_mode": input_fft_shift_mode,
+    "camera_flip_ud": bool(camera_flip_ud),
+    "camera_flip_lr": bool(camera_flip_lr),
     "subtract_background": subtract_background,
     "background_percentile": background_percentile,
     "roi_config_path": str(roi_config_path),
