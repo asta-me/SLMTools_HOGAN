@@ -11,7 +11,7 @@ from PIL import Image
 #%% Physical parameters
 slm_height = 1080            # SLM resolution (height in pixels)
 slm_width = 1080             # SLM resolution (width in pixels)
-wavelength_m = 532e-9        # Wavelength in meters 
+wavelength_m = 520e-9        # Wavelength in meters 
 pixel_pitch = 8*1e-6  # SLM pixel pitch in meters
 
 #%% Calibration frame parameters
@@ -20,7 +20,7 @@ calibration_name = "calib_rs_frame"
 
 #%% Phase diversity parameters
 # Phase curvatures in rad / m^2 (alpha *x^2))
-alphas = np.linspace(4, 18, 4) * 1e6 
+alphas = np.linspace(10, 30, 5) * 1e6 
 # Linear phase term is: 2*pi*(u*x + v*y).
 u_nyquist = 1.0 / (2.0 * pixel_pitch)   # Max shift
 lin_x_cpm = 0.5* u_nyquist              # Linear shift in x

@@ -29,7 +29,7 @@ wavelength_m = 532e-9
 focal_length_m = 100e-3
 
 # PDGS settings.
-nit = 5000                              # Number of iterations for PDGS retrieval.
+nit = 20000                              # Number of iterations for PDGS retrieval.
 flambda = wavelength_m * focal_length_m # Fresnel number parameter for PDGS propagation.
 use_gpu = True                          # GPU Flag
 verbose = True                          # Verbose logging for PDGS iterations (slows down execution)
@@ -57,7 +57,7 @@ roi_config_filename = "fourier_roi_config.json"
 
 # Experimental preprocessing: remove constant camera pedestal not present in simulation.
 subtract_background = True
-background_percentile = 5.0
+background_percentile = 20.0
 
 # FFT/alignment controls for experimental captures.
 # If True, recenter selected first-order patch before resize and set linear term to 0.
@@ -157,8 +157,8 @@ def _build_phase_pdgs(
 ) -> np.ndarray:
     # Consistent with one_shot convention: div = (alpha/2)*r^2 + beta·x.
     quadratic = (alpha_rad_per_m2 / 2.0) * (y_m**2 + x_m**2)
-    #TEMPORARY
-    quadratic = (alpha_rad_per_m2 ) * (y_m**2 + x_m**2)
+    # #TEMPORARY
+    # quadratic = (alpha_rad_per_m2 ) * (y_m**2 + x_m**2)
     linear = beta_row * y_m + beta_col * x_m
     return quadratic + linear
 
@@ -177,7 +177,7 @@ def _manual_pick_rect(img: np.ndarray, title: str) -> tuple[int, int, int, int]:
     # Contrast enhancement and gamma correction for better edge visibility
     img_normalized = img.astype(np.float64)
     img_normalized = (img_normalized - img_normalized.min()) / (img_normalized.max() - img_normalized.min() + 1e-8)
-    gamma = 0.5
+    gamma = 0.2
     img_corrected = np.power(img_normalized, gamma)
     
     fig, ax = plt.subplots(figsize=(10, 8))

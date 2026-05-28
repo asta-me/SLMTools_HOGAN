@@ -66,7 +66,7 @@ screen_index = 1
 wait_ms = 120.0
 # Camera options for FLIR acquisition.
 camera_index = 0                # Default to first detected camera
-exposure_us = 50.0              # Exposure time in microseconds
+exposure_us = 1300.0              # Exposure time in microseconds
 timeout_ms = 2000               # Timeout for camera acquisition in milliseconds
 convert_to = "native"           # Conversion mode for acquired images
 
