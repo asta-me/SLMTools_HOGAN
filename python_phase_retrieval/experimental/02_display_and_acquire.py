@@ -65,15 +65,15 @@ def _save_capture_image(frame: np.ndarray, out_path: Path) -> None:
 # SLM monitor index for pygame.
 screen_index = 1
 # Wait after displaying a pattern before capture.
-wait_ms = 120.0
+wait_ms = 200.0
 # Camera options for FLIR acquisition.
 camera_index = 0                # Default to first detected camera
-exposure_us = 1300.0              # Exposure time in microseconds
+exposure_us = 3000.0              # Exposure time in microseconds
 timeout_ms = 2000               # Timeout for camera acquisition in milliseconds
 convert_to = "native"           # Conversion mode for acquired images
 
 # Measurement dataset label.
-measurement_label = "20260529_test_01"
+measurement_label = "20260529_test_02"
 
 # Folder with BMP patterns created by 01_generate_phases.py
 experiment_directory = Path(__file__).resolve().parent
