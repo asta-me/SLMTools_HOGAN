@@ -178,8 +178,6 @@ def _build_phase_pdgs(
 ) -> np.ndarray:
     # Consistent with one_shot convention: div = (alpha/2)*r^2 + beta·x.
     quadratic = (alpha_rad_per_m2 / 2.0) * (y_m**2 + x_m**2)
-    # #TEMPORARY
-    # quadratic = (alpha_rad_per_m2 ) * (y_m**2 + x_m**2)
     linear = beta_row * y_m + beta_col * x_m
     return quadratic + linear
 
