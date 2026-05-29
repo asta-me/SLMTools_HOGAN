@@ -2,7 +2,9 @@
 #%% Imports
 from __future__ import annotations
 
+import json
 import time
+from datetime import datetime
 from pathlib import Path
 import re
 
@@ -70,12 +72,19 @@ exposure_us = 1300.0              # Exposure time in microseconds
 timeout_ms = 2000               # Timeout for camera acquisition in milliseconds
 convert_to = "native"           # Conversion mode for acquired images
 
+# Measurement dataset label.
+measurement_label = "20260529_test_01"
+
 # Folder with BMP patterns created by 01_generate_phases.py
 experiment_directory = Path(__file__).resolve().parent
-patterns_dir = experiment_directory / "output" / "patterns_bmp"
+dataset_dir = experiment_directory / "dataset" / measurement_label
+patterns_dir = dataset_dir / "01_patterns_bmp"
 
 # Folder where acquired TIFF images will be saved.
-captures_dir = experiment_directory / "output" / "captures_tif"
+captures_dir = dataset_dir / "02_captures_tif"
+
+# Measurement log created by 01_generate_phases.py.
+measure_log_path = dataset_dir / "measure_log.json"
 
 # Calibration capture name without file extension (stem) created by 01_generate_phases.py.
 calibration_pattern_stem = "calib_rs_frame"
@@ -150,3 +159,34 @@ finally:
         close_pygame()
 
 print(f"Completed acquisition of {len(bmp_files)} TIFF frames into: {captures_dir}")
+
+
+#%% Update measurement log (acquisition)
+if not measure_log_path.exists():
+    raise FileNotFoundError(
+        f"Measurement log not found: {measure_log_path}. "
+        "Run 01_generate_phases.py first to initialize the measurement dataset."
+    )
+
+with measure_log_path.open("r", encoding="utf-8") as f:
+    measure_log = json.load(f)
+
+measure_log["measurement_label"] = measurement_label
+measure_log["dataset_dir"] = str(dataset_dir)
+measure_log["acquisition"] = {
+    "screen_index": int(screen_index),
+    "camera_index": int(camera_index),
+    "exposure_us": float(exposure_us),
+    "timeout_ms": int(timeout_ms),
+    "wait_ms": float(wait_ms),
+    "convert_to": convert_to,
+    "calibration_pattern_stem": calibration_pattern_stem,
+    "num_patterns": int(len(bmp_files)),
+    "num_captures": int(len(bmp_files)),
+    "updated_at": datetime.now().isoformat(timespec="seconds"),
+}
+
+with measure_log_path.open("w", encoding="utf-8") as f:
+    json.dump(measure_log, f, indent=2)
+
+print(f"Updated measure log: {measure_log_path}")

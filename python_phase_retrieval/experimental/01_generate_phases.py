@@ -4,21 +4,26 @@ from a list of curvatures (alpha) and shifts (beta)
 and export the phase pattern as a BMP files."""
 #%% Imports
 from __future__ import annotations
+import json
+from datetime import datetime
 from pathlib import Path
 import numpy as np
 from PIL import Image
 
-#%% Physical parameters
+#%% Configuration
+measurement_label = "20260529_test_01"
+
+# Physical parameters
 slm_height = 1080            # SLM resolution (height in pixels)
 slm_width = 1080             # SLM resolution (width in pixels)
 wavelength_m = 520e-9        # Wavelength in meters 
 pixel_pitch = 8*1e-6  # SLM pixel pitch in meters
 
-#%% Calibration frame parameters
+# Calibration frame parameters
 generate_calibration_pattern = True
 calibration_name = "calib_rs_frame"
 
-#%% Phase diversity parameters
+# Phase diversity parameters
 # Phase curvatures in rad / m^2 (alpha *x^2))
 alphas = np.linspace(10, 30, 5) * 1e6 
 # Linear phase term is: 2*pi*(u*x + v*y).
@@ -29,8 +34,10 @@ lin_y_cpm = 0.5 * u_nyquist             # Linear shift in y
 #%% Define output paths
 # Take the path of the folder containing of this script
 experiment_directory = Path(__file__).resolve().parent
-# Define outputs directory
-output_dir = experiment_directory / "output" / "patterns_bmp"
+# Define dataset directories and measure log path
+dataset_dir = experiment_directory / "dataset" / measurement_label
+patterns_dir = dataset_dir / "01_patterns_bmp"
+measure_log_path = dataset_dir / "measure_log.json"
 # Generate a calibration hologram frame used to map Fourier plane on camera.
 
 #%% Helpers
@@ -139,7 +146,7 @@ def _alpha_tag_e06(value: float) -> str:
 #%% Generate and save patterns
 
 # Calibration Frame
-output_dir.mkdir(parents=True, exist_ok=True) # Create output directory if it doesn't exist
+patterns_dir.mkdir(parents=True, exist_ok=True) # Create output directory if it doesn't exist
 
 if generate_calibration_pattern:
     # 1) Build the calibration target frame
@@ -149,7 +156,7 @@ if generate_calibration_pattern:
     #Convert to uint8
     calib_uint8 = _phase_to_uint8_mod_2pi(calib_phase)
     #Save as bmp
-    Image.fromarray(calib_uint8, mode="L").save(output_dir / f"{calibration_name}.bmp")
+    Image.fromarray(calib_uint8, mode="L").save(patterns_dir / f"{calibration_name}.bmp")
     
     print(f"Generated calibration pattern: {calibration_name}.bmp")
 
@@ -173,6 +180,31 @@ for alpha in np.sort(alphas):
     # Save as bmp with a name encoding the parameters
     alpha_tag = _alpha_tag_e06(float(alpha))
     bmp_name = f"a_{alpha_tag}_x_{linx_tag}_y_{liny_tag}.bmp"
-    Image.fromarray(phase_uint8, mode="L").save(output_dir / bmp_name)
+    Image.fromarray(phase_uint8, mode="L").save(patterns_dir / bmp_name)
 
-print(f"Generated {len(alphas)} patterns in: {output_dir}")
+print(f"Generated {len(alphas)} patterns in: {patterns_dir}")
+
+
+#%% Write measurement log (initialization)
+measure_log = {
+    "measurement_label": measurement_label,
+    "dataset_dir": str(dataset_dir),
+    "created_by": "01_generate_phases.py",
+    "created_at": datetime.now().isoformat(timespec="seconds"),
+    "generation": {
+        "slm_height": int(slm_height),
+        "slm_width": int(slm_width),
+        "wavelength_m": float(wavelength_m),
+        "pixel_pitch": float(pixel_pitch),
+        "generate_calibration_pattern": bool(generate_calibration_pattern),
+        "calibration_name": calibration_name,
+        "alphas_rad_per_m2": [float(a) for a in np.asarray(alphas).tolist()],
+        "lin_x_cpm": float(lin_x_cpm),
+        "lin_y_cpm": float(lin_y_cpm),
+    },
+}
+
+with measure_log_path.open("w", encoding="utf-8") as f:
+    json.dump(measure_log, f, indent=2)
+
+print(f"Initialized measure log: {measure_log_path}")
