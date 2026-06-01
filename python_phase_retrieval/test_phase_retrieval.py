@@ -27,6 +27,7 @@ import numpy as np
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from python_phase_retrieval.lattice_utils import shifted_fftn
 from python_phase_retrieval.phase_retrieval import one_shot, pdgs_log
 
 #%% Helper functions
@@ -45,8 +46,8 @@ def normalize_field_energy(field: np.ndarray) -> np.ndarray:
     return u / np.sqrt(energy)
 
 def fourier_dir(v: np.ndarray) -> np.ndarray:
-    # Shifted FFT
-    return np.fft.fftshift(np.fft.fftn(np.fft.ifftshift(v)))
+    # Centered FFT helper from lattice_utils (same convention as explicit expression).
+    return shifted_fftn(v)
 
 def phase_rmse(est: np.ndarray, ref: np.ndarray, mask: np.ndarray | None = None) -> float:
     # Compute wrapped phase RMSE, optionally restricted to a mask.
@@ -117,7 +118,7 @@ show_progress = True          # Print iteration logs
 
 # Phase-diversity parameters
 # Quadratic term: phi_quad = 0.5 * alpha * (x^2 + y^2), alpha in [rad / m^2].
-alphas = np.linspace(20, 80, 10) * 1e6                                           # [rad/m^2]
+alphas = np.linspace(20, 80, 5) * 1e6                                           # [rad/m^2]
 # Linear term : phi_lin = 2*pi*(u*x + v*y).
 u_nyquist_cpm = 1.0 / (2.0 * slm_pixel_pitch_m)         
 lin_x_cpm = -0.5 * u_nyquist_cpm
@@ -233,7 +234,7 @@ beam_init_aligned = align_global_phase(beam_init, phase_true, weights=amp_true)
 ph_init_err = phase_rmse(np.angle(beam_init_aligned), phase_true, mask=phase_eval_mask)
 print(f"One-Shot initial phase RMSE: {ph_init_err:.4f} rad")
 
-#%% PDGS iterative refinement
+#%% Phase Diversity Gerchberg-Saxton (PDGS) iterative refinement
 # Main solver: enforces modulus constraints from all diversity images.
 
 beam_est, logs = pdgs_log(
@@ -271,7 +272,7 @@ print(f"Final amplitude RMSE    : {amp_err:.6f}")
 print(f"Final phase RMSE (masked): {ph_err:.6f} rad  (one-shot was {ph_init_err:.4f} rad)")
 
 
-#%% Convergence metrics (separate linear plots)
+#%% Plot convergence metrics (separate linear plots)
 # Plot each metric on its own axis because their characteristic scales differ.
 
 iters = np.array([x.iteration for x in logs], dtype=int)

@@ -1,6 +1,15 @@
 """Minimal Python translation of phase retrieval methods used in SLMTools_HOGAN."""
 
 from .lattice_utils import (
+    centered_self_dual_axis,
+    centered_self_dual_lattice,
+    reciprocal_lattice,
+    reciprocal_phase_ramp,
+    squared_radius,
+    lattice_dot,
+    shifted_fftn,
+    shifted_ifftn,
+    unit_phasor,
     natrange,
     natlat,
     dual_shift_lattice,
@@ -14,6 +23,15 @@ from .lattice_utils import (
 from .phase_retrieval import one_shot, pdgs, pdgs_log
 
 __all__ = [
+    "centered_self_dual_axis",
+    "centered_self_dual_lattice",
+    "reciprocal_lattice",
+    "reciprocal_phase_ramp",
+    "squared_radius",
+    "lattice_dot",
+    "shifted_fftn",
+    "shifted_ifftn",
+    "unit_phasor",
     "natrange",
     "natlat",
     "dual_shift_lattice",

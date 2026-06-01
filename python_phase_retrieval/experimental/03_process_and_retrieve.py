@@ -432,7 +432,7 @@ zero_v_rect = tuple(int(v) for v in roi_cfg["zero_v_rect_in_fov"])
 #%% Build diversity phases and processed modulus stack
 y_m_1d = (np.arange(slm_height, dtype=float) - (slm_height - 1) / 2.0) * pixel_pitch
 x_m_1d = (np.arange(slm_width, dtype=float) - (slm_width - 1) / 2.0) * pixel_pitch
-L = (y_m_1d, x_m_1d)
+lattice = (y_m_1d, x_m_1d)
 y_m, x_m = np.meshgrid(y_m_1d, x_m_1d, indexing="ij")
 
 imgs_modulus: list[np.ndarray] = []
@@ -452,7 +452,7 @@ for pattern_path in pattern_files:
         raise FileNotFoundError(f"Missing capture for pattern {pattern_path.name}: {capture_path}")
 
     alpha_phys, linx_phys, liny_phys = _parse_pattern_params(pattern_path.stem)
-    # ldot(beta, L) follows (row, col) order => (y, x) in physical SI units.
+    # lattice_dot(beta, lattice) follows (row, col) order => (y, x) in SI units.
     # If signal is recentered in Fourier plane, linear carrier is removed.
     if center_signal_order:
         beta_row = 0.0
@@ -538,7 +538,7 @@ beam_guess = one_shot(
     img_intensity=imgs_intensity[-1],
     alpha=alpha_guess,
     beta=(beta_row_guess, beta_col_guess),
-    L=L,
+    L=lattice,
     flambda=flambda,
 )
 beam_guess = _normalize_field_energy(beam_guess)
@@ -548,7 +548,7 @@ beam_est, logs = pdgs_log(
     div_phases=div_phases,
     nit=nit,
     beam_guess=beam_guess,
-    L=L,
+    L=lattice,
     flambda=flambda,
     verbose=verbose,
     progress_every=progress_every,

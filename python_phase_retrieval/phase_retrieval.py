@@ -15,9 +15,23 @@ except Exception:
 if __package__ is None or __package__ == "":
     # Allow direct execution: python python_phase_retrieval/phase_retrieval.py
     sys.path.append(str(Path(__file__).resolve().parents[1]))
-    from python_phase_retrieval.lattice_utils import Lattice, dual_phase, dual_shift_lattice, isft, ldot, phasor, r2, sft
+    from python_phase_retrieval.lattice_utils import (
+        Lattice,
+        lattice_dot,
+        reciprocal_lattice,
+        reciprocal_phase_ramp,
+        shifted_ifftn,
+        squared_radius,
+    )
 else:
-    from .lattice_utils import Lattice, dual_phase, dual_shift_lattice, isft, ldot, phasor, r2, sft
+    from .lattice_utils import (
+        Lattice,
+        lattice_dot,
+        reciprocal_lattice,
+        reciprocal_phase_ramp,
+        shifted_ifftn,
+        squared_radius,
+    )
 
 
 @dataclass
@@ -36,10 +50,13 @@ def _to_numpy(a):
 
 
 def _phasor_xp(x, xp):
+    # Return unit phasor with same shape as x, using xp (np or cp) for computation.
     return xp.exp(1j * xp.angle(x))
 
 
 def _phase_rmse(est: np.ndarray, ref: np.ndarray, mask: np.ndarray | None = None) -> float:
+    # Root mean square error of phase differences, 
+    # only in mask region, accounting for 2pi periodicity.
     diff = np.angle(np.exp(1j * (est - ref)))
     if mask is not None:
         diff = diff[mask]
@@ -56,24 +73,29 @@ def _align_global_phase(est: np.ndarray, ref: np.ndarray, weights: np.ndarray | 
 
 
 def one_shot(img_intensity, alpha, beta, L, flambda):
-    dL = dual_shift_lattice(L, flambda)
+    # Reciprocal Lattice in Fourier Plane
+    dL = reciprocal_lattice(L, flambda)
     
-    # 1. Converti beta (rad/m) in u0 (cicli/m), poi ricava lo shift fisico xc
+    # 1. Convert beta (rad/m) in u0 (cycles/m)
     u0 = np.asarray(beta, dtype=float) / (2.0 * np.pi)
+    # Convert in physical coords of Fourier Plane
     xc = u0 * flambda
 
-    # 2. Calcola div_phase sulla griglia SLM (L)
-    div_phase = (alpha / 2.0) * r2(L) + ldot(beta, L)
+    # 2. diversity phase on the SLM grid (L) 
+    # With quadratic term alpha/2 and linear beta
+    div_phase = (alpha / 2.0) * squared_radius(L) + lattice_dot(beta, L)
 
-    # 3. Calcola dual_div_phase sulla griglia Fotocamera (dL) con scala (2*pi)^2
-    X_minus_xc_sq = r2(dL) - 2.0 * ldot(xc, dL) + float(np.sum(xc**2))
-    dual_div_phase = - (4.0 * np.pi**2) * X_minus_xc_sq / (2.0 * alpha * flambda**2)
+    # 3. See eq.11. But X is shifted to X-xc because of the linear phase term, 
+    # and this shift induces a linear phase ramp in the Fourier plane (reciprocal lattice) that we must compensate for to get the correct modulus to backpropagate.
+    X_minus_xc_sq = squared_radius(dL) - 2.0 * lattice_dot(xc, dL) + float(np.sum(xc**2))
+    dual_div_phase = - X_minus_xc_sq / (2.0 * alpha)    # Diversity phase in physical coordinates
+    dual_div_phase *= (4.0 * np.pi**2) / (flambda**2)   # Convert to frequency coordinates of Fourier plane 
 
-    # Il modulo del campo è la radice dell'intensità misurata (clip if < 0)
+    # Modulus is root of intensity taken on camera (clip if < 0)
     mod = np.sqrt(np.clip(np.asarray(img_intensity, dtype=float), 0.0, None))
     
-    # ISFT trasporta il campo dalla Fotocamera (dL) all'SLM (L)
-    return isft(mod * np.exp(1j * dual_div_phase)) * np.exp(-1j * div_phase)
+    # ISFT transports the field from the Camera (dL) to the SLM (L)
+    return shifted_ifftn(mod * np.exp(1j * dual_div_phase)) * np.exp(-1j * div_phase)
 
 def pdgs_iter(guess, phis, mods, xp, return_updates=False):
     new_guess = xp.zeros_like(guess)
@@ -130,7 +152,13 @@ def pdgs_log(
     progress_callback: Callable[[dict], None] | None = None,
     use_gpu: bool = False,
 ) -> Tuple[np.ndarray, List[PDGSLogEntry]]:
-    """PDGS with convergence logging similar to Julia pdgsLog plus richer metrics."""
+    """Run PDGS and collect convergence metrics at a configurable cadence.
+    Notes:
+    - Numerical behavior is aligned with the existing Julia original code.
+    - Logging cadence is controlled by ``every`` (metrics) and ``progress_every`` (prints).
+    """
+
+    # Check validity of input variables
     if len(imgs_modulus) == 0:
         raise ValueError("imgs_modulus cannot be empty")
     if len(imgs_modulus) != len(div_phases):
@@ -144,6 +172,8 @@ def pdgs_log(
     if beam_guess.shape != shape:
         raise ValueError("beam_guess shape mismatch")
 
+
+    # Backend selection (NumPy or CuPy)
     gpu_enabled = bool(use_gpu and cp is not None)
     if use_gpu and cp is None:
         print("[PDGS] CuPy not available; falling back to NumPy CPU.")
@@ -152,33 +182,55 @@ def pdgs_log(
     guess_dtype = xp.complex64 if gpu_enabled else np.complex128
     real_dtype = xp.float32 if gpu_enabled else np.float64
 
+    # Internal convention: work in ifftshifted coordinates while iterating.
     guess = xp.fft.ifftshift(xp.asarray(beam_guess, dtype=guess_dtype))
 
-    dphase = dual_phase(L, flambda)
-    phis = tuple(xp.fft.ifftshift(xp.exp(1j * xp.asarray(phi + 2.0 * np.pi * dphase, dtype=real_dtype))) for phi in div_phases)
+
+    # Precompute diversity phasors and moduli in the same shifted convention.
+ 
+    # Usually 0. In simulation x = (arange(n) - n//2) * pitch -> 0 is a coord, shift is 0.
+    # Experimentally i preferred (arange(n) - (n-1)/2) * pitch -> 0 is between coords, shift is half a pixel.
+    dphase = reciprocal_phase_ramp(L, flambda) 
+ 
+    # Convert each diversity phase to a phasor, and shift 
+    phis = tuple(
+        xp.fft.ifftshift(
+            xp.exp(1j * xp.asarray(phi + 2.0 * np.pi * dphase, dtype=real_dtype))
+        )
+        for phi in div_phases
+    )
+    # Same for mods
     mods = tuple(xp.fft.ifftshift(xp.asarray(m, dtype=real_dtype)) for m in imgs_modulus)
 
+    # Initialize logs and timing.
     logs: List[PDGSLogEntry] = []
     t0 = perf_counter()
     if progress_every is None:
         progress_every = max(1, nit // 20)
 
+    # ---------------------------------------------------------------------
+    # Main PDGS loop
+    # ---------------------------------------------------------------------
     for j in range(1, nit + 1):
+        # Log on iterations 1, 1+every, 1+2*every, ...
         should_log = (j - 1) % every == 0
+
+        # Iteration step.        
         new_guess, updates = pdgs_iter(guess, phis, mods, xp, return_updates=should_log)
+        
         mean_step_norm = float(_to_numpy(xp.sqrt(xp.mean(xp.abs(new_guess - guess) ** 2))))
 
         if should_log:
+            # Mean distance between each per-image update and their average.
             mean_update_norm = float(
                 _to_numpy(xp.sqrt(sum(xp.sum(xp.abs(u - new_guess) ** 2) for u in updates)) / len(updates))
             )
+
             # Same ifftshift-space convention as pdgs_iter: use plain fftn.
             per_img_err = xp.stack(
                 [xp.mean((xp.abs(xp.fft.fftn(new_guess * phis[i])) - mods[i]) ** 2) for i in range(len(mods))]
             )
-            self_consistency_error = float(
-                _to_numpy(xp.mean(per_img_err))
-            )
+            self_consistency_error = float(_to_numpy(xp.mean(per_img_err)))
 
             gt_rmse = None
             if phase_truth is not None:
@@ -196,6 +248,7 @@ def pdgs_log(
                 )
             )
 
+        # Optional progress hook / console report.
         if verbose and (j == 1 or j == nit or (j % progress_every == 0)):
             elapsed_s = perf_counter() - t0
             eta_s = elapsed_s / j * (nit - j)
@@ -220,6 +273,8 @@ def pdgs_log(
                     f"sc {latest_sc:.3e} | gt {gt_text}"
                 )
 
+        # Next iteration starts from the current estimate.
         guess = new_guess
 
+    # Return estimate in centered (fftshifted) coordinates.
     return _to_numpy(xp.fft.fftshift(guess)), logs
