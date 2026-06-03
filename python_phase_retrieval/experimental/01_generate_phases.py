@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 #%% Configuration
-measurement_label = "20260529_test_02"
+measurement_label = "20260603_test_02"
 
 # Physical parameters
 slm_height = 1080            # SLM resolution (height in pixels)
