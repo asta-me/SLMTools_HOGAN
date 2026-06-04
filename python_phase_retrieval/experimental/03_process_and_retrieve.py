@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 
 import matplotlib.pyplot as plt
+from matplotlib.widgets import RectangleSelector
 
 # Add parent directory to path for imports (Allows the next import to work)
 if __package__ is None or __package__ == "":
@@ -21,13 +22,13 @@ from python_phase_retrieval.phase_retrieval import one_shot, pdgs_log
 
 #%% Configuration
 # Measurement dataset label.
-measurement_label = "20260603_test_02"
+measurement_label = "20260604_test_01"
 
 # Physical setup used by one_shot/PDGS model.
 focal_length_m = 100e-3
 
 # PDGS settings.
-nit = 1000                              # Number of iterations for PDGS retrieval.
+nit = 20000                              # Number of iterations for PDGS retrieval.
 use_gpu = True                          # GPU Flag
 verbose = True                          # Verbose logging for PDGS iterations (slows down execution)
 progress_every = 250                    # Print progress every N iterations
@@ -50,12 +51,12 @@ save_convergence_plot = True
 show_convergence_plot = True
 
 # ROI selection behavior.
-force_manual_selection = True
+force_manual_selection = False
 roi_config_filename = "fourier_roi_config.json"
 
 # Experimental preprocessing: remove constant camera pedestal not present in simulation.
 subtract_background = True
-background_percentile = 40.0
+background_percentile = 20.0
 
 # FFT/alignment controls for experimental captures.
 # If True, recenter selected first-order patch before resize and set linear term to 0.
@@ -221,14 +222,87 @@ def _manual_pick_rect(img: np.ndarray, title: str) -> tuple[int, int, int, int]:
     return (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
 
 
+def _manual_draw_rect(
+    img: np.ndarray,
+    title: str,
+    display_mode: str = "gamma",
+    display_cmap: str = "gray",
+) -> tuple[int, int, int, int]:
+    # Gamma enhancement + percentile contrast stretch for easier ROI/FOV boundary selection.
+    img_normalized = img.astype(np.float64)
+    img_normalized = (img_normalized - img_normalized.min()) / (img_normalized.max() - img_normalized.min() + 1e-8)
+
+    if display_mode == "gamma":
+        gamma = 0.2
+        img_corrected = np.power(img_normalized, gamma)
+    else:
+        raise ValueError(f"Unsupported display_mode: {display_mode}")
+
+    # Boost local visibility by stretching robust intensity percentiles.
+    p_low, p_high = np.percentile(img_corrected, [1.0, 99.7])
+    img_corrected = np.clip((img_corrected - p_low) / (p_high - p_low + 1e-8), 0.0, 1.0)
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.imshow(img_corrected, cmap=display_cmap)
+    ax.set_title(
+        title + "\nLeft click+drag to draw, adjust handles/drag box, ENTER to confirm, ESC to cancel"
+    )
+
+    selected_rect: dict[str, tuple[int, int, int, int]] = {}
+    cancelled = {"value": False}
+
+    def _on_select(eclick, erelease) -> None:
+        if eclick.xdata is None or eclick.ydata is None:
+            return
+        if erelease.xdata is None or erelease.ydata is None:
+            return
+
+        x0 = int(round(min(eclick.xdata, erelease.xdata)))
+        y0 = int(round(min(eclick.ydata, erelease.ydata)))
+        x1 = int(round(max(eclick.xdata, erelease.xdata)))
+        y1 = int(round(max(eclick.ydata, erelease.ydata)))
+        selected_rect["rect"] = (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+
+    def _on_key(event) -> None:
+        key = (event.key or "").lower()
+        if key in ("enter", "return"):
+            if "rect" in selected_rect:
+                plt.close(fig)
+            else:
+                print("Draw a rectangle first, then press ENTER.")
+        elif key == "escape":
+            cancelled["value"] = True
+            plt.close(fig)
+
+    selector = RectangleSelector(
+        ax,
+        _on_select,
+        useblit=True,
+        button=[1],
+        minspanx=2,
+        minspany=2,
+        spancoords="pixels",
+        interactive=True,
+        props={"edgecolor": "red", "facecolor": "none", "linewidth": 2.0, "alpha": 1.0},
+    )
+
+    # Keep a reference alive for the full figure lifetime.
+    _ = selector
+    fig.canvas.mpl_connect("key_press_event", _on_key)
+    plt.show()
+
+    if cancelled["value"]:
+        raise RuntimeError(f"Selection cancelled for: {title}")
+
+    rect = selected_rect.get("rect")
+    if rect is None:
+        raise RuntimeError(f"Selection cancelled for: {title}")
+    return rect
+
+
 def _crop_rect(img: np.ndarray, rect: tuple[int, int, int, int]) -> np.ndarray:
     x, y, w, h = rect
     return img[y:y + h, x:x + w]
-
-
-def _apply_rect_zero(mask: np.ndarray, rect: tuple[int, int, int, int]) -> None:
-    x, y, w, h = rect
-    mask[y:y + h, x:x + w] = 0.0
 
 
 def _resize_nearest(img: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
@@ -350,30 +424,35 @@ def _save_retrieved_amplitude_phase_plot(
 
 
 
-def _manual_select_roi_config(calib_img: np.ndarray, config_path: Path) -> dict:
+def _manual_select_roi_config(
+    calib_img: np.ndarray,
+    max_alpha_img: np.ndarray,
+    max_alpha_stem: str,
+    config_path: Path,
+) -> dict:
     print("Manual ROI selection started")
-    fov_rect = _manual_pick_rect(
+    fov_rect = _manual_draw_rect(
         calib_img,
-        "Select OUTER corners of calibration frame (defines full Fourier FOV)",
+        "Select FOV on calibration frame (drag, adjust, ENTER to confirm)",
+        display_mode="gamma",
+        display_cmap="plasma",
     )
     fov_rect = _clip_rect_to_shape(fov_rect, calib_img.shape)
 
-    fov_img = _crop_rect(calib_img, fov_rect)
+    fov_img_max_alpha = _crop_rect(max_alpha_img, fov_rect)
 
-    signal_rect = _manual_pick_rect(fov_img, "Select SIGNAL ROI (e.g. top-left 1st order)")
-    signal_rect = _clip_rect_to_shape(signal_rect, fov_img.shape)
-
-    zero_h_rect = _manual_pick_rect(fov_img, "Select ZERO-ORDER HORIZONTAL rectangle")
-    zero_h_rect = _clip_rect_to_shape(zero_h_rect, fov_img.shape)
-
-    zero_v_rect = _manual_pick_rect(fov_img, "Select ZERO-ORDER VERTICAL rectangle")
-    zero_v_rect = _clip_rect_to_shape(zero_v_rect, fov_img.shape)
+    signal_rect = _manual_draw_rect(
+        fov_img_max_alpha,
+        f"Select SIGNAL ROI on max-alpha frame ({max_alpha_stem})",
+        display_mode="gamma",
+        display_cmap="prism",
+    )
+    signal_rect = _clip_rect_to_shape(signal_rect, fov_img_max_alpha.shape)
 
     cfg = {
         "fov_rect": list(fov_rect),
         "signal_rect_in_fov": list(signal_rect),
-        "zero_h_rect_in_fov": list(zero_h_rect),
-        "zero_v_rect_in_fov": list(zero_v_rect),
+        "signal_roi_source_pattern_stem": max_alpha_stem,
     }
 
     with config_path.open("w", encoding="utf-8") as f:
@@ -415,9 +494,25 @@ if not calib_capture.exists():
 
 #%% Manual ROI selection or reuse saved config
 calib_img = _load_gray_image(calib_capture)
+
+# Use the capture corresponding to the highest alpha pattern for signal ROI selection.
+max_alpha_pattern = max(pattern_files, key=lambda p: _parse_pattern_params(p.stem)[0])
+max_alpha_capture = captures_dir / f"{max_alpha_pattern.stem}.tif"
+if not max_alpha_capture.exists():
+    raise FileNotFoundError(
+        f"Max-alpha capture not found: {max_alpha_capture}. "
+        "Acquire all diversity captures before running retrieval."
+    )
+max_alpha_img = _load_gray_image(max_alpha_capture)
+
 roi_config_path = results_dir / roi_config_filename
 if force_manual_selection:
-    roi_cfg = _manual_select_roi_config(calib_img, roi_config_path)
+    roi_cfg = _manual_select_roi_config(
+        calib_img=calib_img,
+        max_alpha_img=max_alpha_img,
+        max_alpha_stem=max_alpha_pattern.stem,
+        config_path=roi_config_path,
+    )
 else:
     with roi_config_path.open("r", encoding="utf-8") as f:
         roi_cfg = json.load(f)
@@ -425,8 +520,6 @@ else:
 
 fov_rect = tuple(int(v) for v in roi_cfg["fov_rect"])
 signal_rect = tuple(int(v) for v in roi_cfg["signal_rect_in_fov"])
-zero_h_rect = tuple(int(v) for v in roi_cfg["zero_h_rect_in_fov"])
-zero_v_rect = tuple(int(v) for v in roi_cfg["zero_v_rect_in_fov"])
 
 
 #%% Build diversity phases and processed modulus stack
@@ -475,10 +568,6 @@ for pattern_path in pattern_files:
     mask = np.zeros(fov_img.shape, dtype=np.float64)
     sx, sy, sw, sh = signal_rect
     mask[sy:sy + sh, sx:sx + sw] = 1.0
-
-    # Then force zero in the two zero-order rectangles.
-    _apply_rect_zero(mask, zero_h_rect)
-    _apply_rect_zero(mask, zero_v_rect)
 
     masked_fov = fov_img.astype(np.float64) * mask
 
@@ -606,6 +695,7 @@ run_summary = {
     "subtract_background": subtract_background,
     "background_percentile": background_percentile,
     "roi_config_path": str(roi_config_path),
+    "signal_roi_source_pattern_stem": roi_cfg.get("signal_roi_source_pattern_stem", ""),
     "processed_pattern_stems": [p.stem for p in pattern_files],
     "processed_pattern_params_physical": [
         {
@@ -639,8 +729,7 @@ measure_log["retrieval"] = {
     "roi": {
         "fov_rect": [int(v) for v in fov_rect],
         "signal_rect_in_fov": [int(v) for v in signal_rect],
-        "zero_h_rect_in_fov": [int(v) for v in zero_h_rect],
-        "zero_v_rect_in_fov": [int(v) for v in zero_v_rect],
+        "signal_roi_source_pattern_stem": str(roi_cfg.get("signal_roi_source_pattern_stem", "")),
         "roi_config_path": str(roi_config_path),
     },
     "outputs": {

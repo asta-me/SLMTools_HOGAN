@@ -11,21 +11,24 @@ import numpy as np
 from PIL import Image
 
 #%% Configuration
-measurement_label = "20260603_test_02"
+measurement_label = "20260604_test_01"
 
 # Physical parameters
 slm_height = 1080            # SLM resolution (height in pixels)
-slm_width = 1080             # SLM resolution (width in pixels)
+slm_width =  1080            # SLM resolution (width in pixels)
 wavelength_m = 520e-9        # Wavelength in meters 
 pixel_pitch = 8*1e-6  # SLM pixel pitch in meters
 
 # Calibration frame parameters
 generate_calibration_pattern = True
 calibration_name = "calib_rs_frame"
+calibration_target_tif_name = "FOV_calib_frame_2.tif"
+calibration_target_tif_path = Path(r"C:\Users\astam\Desktop\Target_Imgs\FOV_calib_frame_3.tif")
 
 # Phase diversity parameters
 # Phase curvatures in rad / m^2 (alpha *x^2))
-alphas = np.linspace(10, 30, 10) * 1e6 
+# alphas = np.linspace(10, 30, 10) * 1e6
+alphas = np.concatenate((np.linspace(-30, -10, 5), np.linspace(10, 30, 5))) * 1e6
 # Linear phase term is: 2*pi*(u*x + v*y).
 u_nyquist = 1.0 / (2.0 * pixel_pitch)   # Max shift
 lin_x_cpm = 0.5* u_nyquist              # Linear shift in x
@@ -56,6 +59,24 @@ def _phase_to_uint8_mod_2pi(phase_rad: np.ndarray) -> np.ndarray:
     wrapped = np.mod(phase_rad, 2.0 * np.pi)
     scaled = wrapped * (255.0 / (2.0 * np.pi))
     return np.round(scaled).astype(np.uint8)
+
+def _normalize_01(arr: np.ndarray) -> np.ndarray:
+    """Normalize array to [0, 1], returning zeros for constant inputs."""
+    x = np.asarray(arr, dtype=np.float64)
+    vmin = float(np.min(x))
+    vmax = float(np.max(x))
+    if np.isclose(vmax, vmin):
+        return np.zeros_like(x, dtype=np.float64)
+    return (x - vmin) / (vmax - vmin)
+
+def _load_gray_image(path: Path) -> np.ndarray:
+    """Load image as grayscale float64 array."""
+    arr = np.asarray(Image.open(path))
+    if arr.ndim == 2:
+        return arr.astype(np.float64)
+    if arr.ndim == 3:
+        return np.mean(arr.astype(np.float64), axis=2)
+    raise ValueError(f"Unsupported image shape for {path}: {arr.shape}")
 
 def _amplitude_to_uint8(amplitude: np.ndarray) -> np.ndarray:
     """Rescale amplitude in [0,255] for uint8 representation."""
@@ -149,8 +170,20 @@ def _alpha_tag_e06(value: float) -> str:
 patterns_dir.mkdir(parents=True, exist_ok=True) # Create output directory if it doesn't exist
 
 if generate_calibration_pattern:
-    # 1) Build the calibration target frame
-    calib_target = generate_target_frame(slm_height, slm_width)
+    # 1) Load calibration target from TIFF and map to [0, 1] amplitude.
+    if not calibration_target_tif_path.exists():
+        raise FileNotFoundError(
+            f"Calibration target TIFF not found: {calibration_target_tif_path}"
+        )
+
+    calib_target = _load_gray_image(calibration_target_tif_path)
+    if calib_target.shape != (slm_height, slm_width):
+        raise ValueError(
+            "Calibration target shape mismatch: "
+            f"{calib_target.shape} vs expected {(slm_height, slm_width)}"
+        )
+    calib_target = _normalize_01(calib_target)
+
     # 2) Build the RS hologram phase from that target.
     calib_phase = rs_simple(target_amplitude=calib_target)
     #Convert to uint8
@@ -158,7 +191,10 @@ if generate_calibration_pattern:
     #Save as bmp
     Image.fromarray(calib_uint8, mode="L").save(patterns_dir / f"{calibration_name}.bmp")
     
-    print(f"Generated calibration pattern: {calibration_name}.bmp")
+    print(
+        f"Generated calibration pattern: {calibration_name}.bmp "
+        f"from {calibration_target_tif_path.name}"
+    )
 
 
 # Phase diversity imgs
@@ -198,6 +234,8 @@ measure_log = {
         "pixel_pitch": float(pixel_pitch),
         "generate_calibration_pattern": bool(generate_calibration_pattern),
         "calibration_name": calibration_name,
+        "calibration_target_tif_name": calibration_target_tif_name,
+        "calibration_target_tif_path": str(calibration_target_tif_path),
         "alphas_rad_per_m2": [float(a) for a in np.asarray(alphas).tolist()],
         "lin_x_cpm": float(lin_x_cpm),
         "lin_y_cpm": float(lin_y_cpm),
