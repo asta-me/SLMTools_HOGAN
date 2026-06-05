@@ -53,6 +53,8 @@ show_convergence_plot = True
 # ROI selection behavior.
 force_manual_selection = True
 roi_config_filename = "fourier_roi_config.json"
+fov_selection_mode = "overlay"  # "overlay" or "rectangle"
+fov_overlay_alpha = 0.45
 
 # Experimental preprocessing: remove constant camera pedestal not present in simulation.
 subtract_background = True
@@ -112,6 +114,23 @@ def _load_gray_image(path: Path) -> np.ndarray:
         # Convert color to grayscale while preserving dynamic range.
         return np.mean(arr.astype(np.float64), axis=2)
     raise ValueError(f"Unsupported image shape for {path}: {arr.shape}")
+
+
+def _normalize_01(arr: np.ndarray) -> np.ndarray:
+    x = np.asarray(arr, dtype=np.float64)
+    vmin = float(np.min(x))
+    vmax = float(np.max(x))
+    if np.isclose(vmax, vmin):
+        return np.zeros_like(x, dtype=np.float64)
+    return (x - vmin) / (vmax - vmin)
+
+
+def _resize_image_to_shape(img: np.ndarray, shape_hw: tuple[int, int]) -> np.ndarray:
+    h, w = shape_hw
+    arr = np.asarray(np.clip(_normalize_01(img), 0.0, 1.0) * 255.0, dtype=np.uint8)
+    pil_img = Image.fromarray(arr, mode="L")
+    resized = pil_img.resize((w, h), resample=Image.Resampling.BICUBIC)
+    return np.asarray(resized, dtype=np.float64) / 255.0
 
 
 def _parse_tag(tag: str) -> float:
@@ -300,6 +319,111 @@ def _manual_draw_rect(
     return rect
 
 
+def _manual_draw_fov_with_target_overlay(
+    camera_img: np.ndarray,
+    target_img: np.ndarray,
+    title: str,
+    overlay_alpha: float,
+) -> tuple[int, int, int, int]:
+    cam = _normalize_01(camera_img)
+    gamma = 0.2
+    cam = np.power(cam, gamma)
+    p_low, p_high = np.percentile(cam, [1.0, 99.7])
+    cam = np.clip((cam - p_low) / (p_high - p_low + 1e-8), 0.0, 1.0)
+
+    target = _normalize_01(target_img)
+    if target.shape != cam.shape:
+        target = _resize_image_to_shape(target, cam.shape)
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.imshow(cam, cmap="gray")
+    ax.set_title(
+        title + "\nDrag FOV rectangle, adjust handles to align overlaid target frame, ENTER to confirm"
+    )
+
+    overlay_data = np.zeros_like(cam, dtype=np.float64)
+    overlay_alpha_map = np.zeros_like(cam, dtype=np.float64)
+    overlay_artist = ax.imshow(overlay_data, cmap="spring", alpha=overlay_alpha_map)
+    rect_artist = plt.Rectangle((0, 0), 1, 1, fill=False, edgecolor="lime", linewidth=1.0)
+    ax.add_patch(rect_artist)
+
+    h, w = cam.shape
+    init_size = int(round(0.7 * min(h, w)))
+    init_x = max(0, (w - init_size) // 2)
+    init_y = max(0, (h - init_size) // 2)
+
+    selected_rect: dict[str, tuple[int, int, int, int]] = {}
+    cancelled = {"value": False}
+
+    def _update_overlay(rect: tuple[int, int, int, int]) -> None:
+        x0, y0, rw, rh = _clip_rect_to_shape(rect, cam.shape)
+        target_rs = _resize_image_to_shape(target, (rh, rw))
+
+        overlay_data.fill(0.0)
+        overlay_alpha_map.fill(0.0)
+        overlay_data[y0:y0 + rh, x0:x0 + rw] = target_rs
+        overlay_alpha_map[y0:y0 + rh, x0:x0 + rw] = overlay_alpha * np.clip(target_rs, 0.0, 1.0)
+
+        overlay_artist.set_data(overlay_data)
+        overlay_artist.set_alpha(overlay_alpha_map)
+        rect_artist.set_xy((x0, y0))
+        rect_artist.set_width(rw)
+        rect_artist.set_height(rh)
+        fig.canvas.draw_idle()
+
+    def _on_select(eclick, erelease) -> None:
+        if eclick.xdata is None or eclick.ydata is None:
+            return
+        if erelease.xdata is None or erelease.ydata is None:
+            return
+
+        x0 = int(round(min(eclick.xdata, erelease.xdata)))
+        y0 = int(round(min(eclick.ydata, erelease.ydata)))
+        x1 = int(round(max(eclick.xdata, erelease.xdata)))
+        y1 = int(round(max(eclick.ydata, erelease.ydata)))
+        rect = _clip_rect_to_shape((x0, y0, x1 - x0 + 1, y1 - y0 + 1), cam.shape)
+        selected_rect["rect"] = rect
+        _update_overlay(rect)
+
+    def _on_key(event) -> None:
+        key = (event.key or "").lower()
+        if key in ("enter", "return"):
+            if "rect" in selected_rect:
+                plt.close(fig)
+            else:
+                print("Draw a rectangle first, then press ENTER.")
+        elif key == "escape":
+            cancelled["value"] = True
+            plt.close(fig)
+
+    selector = RectangleSelector(
+        ax,
+        _on_select,
+        useblit=True,
+        button=[1],
+        minspanx=2,
+        minspany=2,
+        spancoords="pixels",
+        interactive=True,
+        props={"edgecolor": "lime", "facecolor": "none", "linewidth": 1.0, "alpha": 1.0},
+    )
+
+    selected_rect["rect"] = _clip_rect_to_shape((init_x, init_y, init_size, init_size), cam.shape)
+    _update_overlay(selected_rect["rect"])
+
+    _ = selector
+    fig.canvas.mpl_connect("key_press_event", _on_key)
+    plt.show()
+
+    if cancelled["value"]:
+        raise RuntimeError(f"Selection cancelled for: {title}")
+
+    rect = selected_rect.get("rect")
+    if rect is None:
+        raise RuntimeError(f"Selection cancelled for: {title}")
+    return rect
+
+
 def _crop_rect(img: np.ndarray, rect: tuple[int, int, int, int]) -> np.ndarray:
     x, y, w, h = rect
     return img[y:y + h, x:x + w]
@@ -426,17 +550,28 @@ def _save_retrieved_amplitude_phase_plot(
 
 def _manual_select_roi_config(
     calib_img: np.ndarray,
+    calib_target_img: np.ndarray | None,
     max_alpha_img: np.ndarray,
     max_alpha_stem: str,
     config_path: Path,
+    fov_mode: str,
+    overlay_alpha: float,
 ) -> dict:
     print("Manual ROI selection started")
-    fov_rect = _manual_draw_rect(
-        calib_img,
-        "Select FOV on calibration frame (drag, adjust, ENTER to confirm)",
-        display_mode="gamma",
-        display_cmap="plasma",
-    )
+    if fov_mode == "overlay" and calib_target_img is not None:
+        fov_rect = _manual_draw_fov_with_target_overlay(
+            camera_img=calib_img,
+            target_img=calib_target_img,
+            title="Select FOV by overlaying target frame on calibration capture",
+            overlay_alpha=float(overlay_alpha),
+        )
+    else:
+        fov_rect = _manual_draw_rect(
+            calib_img,
+            "Select FOV on calibration frame (drag, adjust, ENTER to confirm)",
+            display_mode="gamma",
+            display_cmap="plasma",
+        )
     fov_rect = _clip_rect_to_shape(fov_rect, calib_img.shape)
 
     fov_img_max_alpha = _crop_rect(max_alpha_img, fov_rect)
@@ -453,6 +588,7 @@ def _manual_select_roi_config(
         "fov_rect": list(fov_rect),
         "signal_rect_in_fov": list(signal_rect),
         "signal_roi_source_pattern_stem": max_alpha_stem,
+        "fov_selection_mode": fov_mode,
     }
 
     with config_path.open("w", encoding="utf-8") as f:
@@ -494,6 +630,16 @@ if not calib_capture.exists():
 
 #%% Manual ROI selection or reuse saved config
 calib_img = _load_gray_image(calib_capture)
+calib_target_img: np.ndarray | None = None
+calib_target_tif_path = generation_cfg.get("calibration_target_tif_path")
+if isinstance(calib_target_tif_path, str) and calib_target_tif_path.strip():
+    calib_target_path = Path(calib_target_tif_path)
+    if calib_target_path.exists():
+        calib_target_img = _load_gray_image(calib_target_path)
+        if calib_target_img.shape != calib_img.shape:
+            calib_target_img = _resize_image_to_shape(calib_target_img, calib_img.shape)
+    else:
+        print(f"Warning: calibration target TIFF not found for overlay mode: {calib_target_path}")
 
 # Use the capture corresponding to the highest alpha pattern for signal ROI selection.
 max_alpha_pattern = max(pattern_files, key=lambda p: _parse_pattern_params(p.stem)[0])
@@ -509,9 +655,12 @@ roi_config_path = results_dir / roi_config_filename
 if force_manual_selection:
     roi_cfg = _manual_select_roi_config(
         calib_img=calib_img,
+        calib_target_img=calib_target_img,
         max_alpha_img=max_alpha_img,
         max_alpha_stem=max_alpha_pattern.stem,
         config_path=roi_config_path,
+        fov_mode=fov_selection_mode,
+        overlay_alpha=fov_overlay_alpha,
     )
 else:
     with roi_config_path.open("r", encoding="utf-8") as f:
@@ -729,6 +878,7 @@ measure_log["retrieval"] = {
     "roi": {
         "fov_rect": [int(v) for v in fov_rect],
         "signal_rect_in_fov": [int(v) for v in signal_rect],
+        "fov_selection_mode": str(roi_cfg.get("fov_selection_mode", fov_selection_mode)),
         "signal_roi_source_pattern_stem": str(roi_cfg.get("signal_roi_source_pattern_stem", "")),
         "roi_config_path": str(roi_config_path),
     },
