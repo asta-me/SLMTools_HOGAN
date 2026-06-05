@@ -22,13 +22,13 @@ from python_phase_retrieval.phase_retrieval import one_shot, pdgs_log
 
 #%% Configuration
 # Measurement dataset label.
-measurement_label = "20260604_test_01"
+measurement_label = "20260605_test_01"
 
 # Physical setup used by one_shot/PDGS model.
 focal_length_m = 100e-3
 
 # PDGS settings.
-nit = 20000                              # Number of iterations for PDGS retrieval.
+nit = 1000                              # Number of iterations for PDGS retrieval.
 use_gpu = True                          # GPU Flag
 verbose = True                          # Verbose logging for PDGS iterations (slows down execution)
 progress_every = 250                    # Print progress every N iterations
@@ -51,7 +51,7 @@ save_convergence_plot = True
 show_convergence_plot = True
 
 # ROI selection behavior.
-force_manual_selection = False
+force_manual_selection = True
 roi_config_filename = "fourier_roi_config.json"
 
 # Experimental preprocessing: remove constant camera pedestal not present in simulation.
@@ -283,7 +283,7 @@ def _manual_draw_rect(
         minspany=2,
         spancoords="pixels",
         interactive=True,
-        props={"edgecolor": "red", "facecolor": "none", "linewidth": 2.0, "alpha": 1.0},
+        props={"edgecolor": "red", "facecolor": "none", "linewidth": 1.0, "alpha": 1.0},
     )
 
     # Keep a reference alive for the full figure lifetime.
