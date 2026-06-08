@@ -22,13 +22,13 @@ from python_phase_retrieval.phase_retrieval import one_shot, pdgs_log
 
 #%% Configuration
 # Measurement dataset label.
-measurement_label = "20260605_test_01"
+measurement_label = "20260605_test_02"
 
 # Physical setup used by one_shot/PDGS model.
 focal_length_m = 100e-3
 
 # PDGS settings.
-nit = 1000                              # Number of iterations for PDGS retrieval.
+nit = 5000                              # Number of iterations for PDGS retrieval.
 use_gpu = True                          # GPU Flag
 verbose = True                          # Verbose logging for PDGS iterations (slows down execution)
 progress_every = 250                    # Print progress every N iterations
@@ -331,7 +331,8 @@ def _manual_draw_fov_with_target_overlay(
     p_low, p_high = np.percentile(cam, [1.0, 99.7])
     cam = np.clip((cam - p_low) / (p_high - p_low + 1e-8), 0.0, 1.0)
 
-    target = _normalize_01(target_img)
+    # Match camera orientation for interactive overlay alignment.
+    target = np.flipud(_normalize_01(target_img))
     if target.shape != cam.shape:
         target = _resize_image_to_shape(target, cam.shape)
 

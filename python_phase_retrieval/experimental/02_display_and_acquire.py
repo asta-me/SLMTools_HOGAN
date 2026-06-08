@@ -68,12 +68,12 @@ screen_index = 1
 wait_ms = 200.0
 # Camera options for FLIR acquisition.
 camera_index = 0                # Default to first detected camera
-exposure_us = 100             # Exposure time in microseconds
+exposure_us = 120             # Exposure time in microseconds
 timeout_ms = 2000               # Timeout for camera acquisition in milliseconds
 convert_to = "native"           # Conversion mode for acquired images
 
 # Measurement dataset label.
-measurement_label = "20260605_test_01"
+measurement_label = "20260605_test_02"
 
 # Folder with BMP patterns created by 01_generate_phases.py
 experiment_directory = Path(__file__).resolve().parent

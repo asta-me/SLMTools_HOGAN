@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 #%% Configuration
-measurement_label = "20260605_test_01"
+measurement_label = "20260605_test_02"
 
 # Physical parameters
 slm_height = 1080            # SLM resolution (height in pixels)
@@ -28,7 +28,7 @@ calibration_target_tif_path = Path(r"C:\Users\astam\Desktop\Target_Imgs\FOV_cali
 # Phase diversity parameters
 # Phase curvatures in rad / m^2 (alpha *x^2))
 # alphas = np.linspace(10, 30, 10) * 1e6
-alphas = np.concatenate((np.linspace(-30, -10, 5), np.linspace(10, 30, 5))) * 1e6
+alphas = np.concatenate((np.linspace(-35, -10, 5), np.linspace(10, 35, 5))) * 1e6
 # Linear phase term is: 2*pi*(u*x + v*y).
 u_nyquist = 1.0 / (2.0 * pixel_pitch)   # Max shift
 lin_x_cpm = 0.5* u_nyquist              # Linear shift in x
