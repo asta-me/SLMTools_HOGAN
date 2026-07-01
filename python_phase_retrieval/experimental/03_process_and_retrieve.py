@@ -22,14 +22,14 @@ from python_phase_retrieval.phase_retrieval import one_shot, pdgs_log
 
 #%% Configuration
 # Measurement dataset label.
-measurement_label = "20260624_test_01"
+measurement_label = "20260701_test_01"
 
 # Physical setup used by one_shot/PDGS model.
 focal_length_m = 100e-3
 focal_length_m = 80e-3
 
 # PDGS settings.
-nit = 1000                              # Number of iterations for PDGS retrieval.
+nit = 2500                              # Number of iterations for PDGS retrieval.
 use_gpu = True                          # GPU Flag
 verbose = True                          # Verbose logging for PDGS iterations (slows down execution)
 progress_every = 250                    # Print progress every N iterations
@@ -52,10 +52,10 @@ save_convergence_plot = True
 show_convergence_plot = True
 
 # ROI selection behavior.
-force_manual_selection = True
+force_manual_selection = False
 roi_config_filename = "fourier_roi_config.json"
 fov_selection_mode = "overlay"  # "overlay" or "rectangle"
-fov_overlay_alpha = 0.45
+fov_overlay_alpha = 0.8
 
 # Experimental preprocessing: remove constant camera pedestal not present in simulation.
 subtract_background = True
