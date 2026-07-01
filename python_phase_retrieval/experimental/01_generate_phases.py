@@ -1,7 +1,11 @@
+"""Generate phase-diversity BMP patterns and initialize dataset measure_log.json.
+
+Main flow:
+1) Resolve output paths
+2) Optionally generate calibration RS frame
+3) Generate diversity phase BMP patterns
+4) Write measurement log initialization
 """
-Generate phase diversity masks 
-from a list of curvatures (alpha) and shifts (beta) 
-and export the phase pattern as a BMP files."""
 #%% Imports
 from __future__ import annotations
 import json
@@ -11,6 +15,7 @@ import numpy as np
 from PIL import Image
 
 #%% Configuration
+# ---------- User-editable options ----------
 measurement_label = "20260701_test_01"
 
 # Physical parameters
@@ -30,15 +35,16 @@ calibration_target_tif_path = Path(r"C:\Users\astam\Desktop\Target_Imgs\FOV_cali
 
 # Phase diversity parameters
 # Phase curvatures in rad / m^2 (alpha *x^2))
-alphas = np.concatenate((np.linspace(-40, -10, 5), np.linspace(10, 40, 5))) * 1e6
-alphas = np.concatenate((np.linspace(-100, -10, 5), np.linspace(10, 100, 5))) * 1e6
+# alphas = np.concatenate((np.linspace(-40, -10, 5), np.linspace(10, 40, 5))) * 1e6
+# alphas = np.concatenate((np.linspace(-100, -10, 5), np.linspace(10, 100, 5))) * 1e6
 alphas = np.concatenate((np.linspace(-100, -50, 5), np.linspace(50, 100, 5))) * 1e6
 # Linear phase term is: 2*pi*(u*x + v*y).
 u_nyquist = 1.0 / (2.0 * pixel_pitch)   # Max shift
 lin_x_cpm = 0.5* u_nyquist              # Linear shift in x
 lin_y_cpm = 0.5 * u_nyquist             # Linear shift in y
 
-#%% Define output paths
+# ---------- Internal path configuration ----------
+#%% Resolve output paths
 # Take the path of the folder containing of this script
 experiment_directory = Path(__file__).resolve().parent
 # Define dataset directories and measure log path
@@ -48,6 +54,7 @@ measure_log_path = dataset_dir / "measure_log.json"
 # Generate a calibration hologram frame used to map Fourier plane on camera.
 
 #%% Helpers
+#%% ---------- Grid and phase helpers ----------
 def _make_physical_grid(height: int, width: int, pixel_pitch: float) -> tuple[np.ndarray, np.ndarray]:
     """Create a physical grid for the SLM.
     Why the "-1" term? see (N=4):
@@ -64,6 +71,8 @@ def _phase_to_uint8_mod_2pi(phase_rad: np.ndarray) -> np.ndarray:
     scaled = wrapped * (255.0 / (2.0 * np.pi))
     return np.round(scaled).astype(np.uint8)
 
+
+#%% ---------- Image loading and normalization helpers ----------
 def _normalize_01(arr: np.ndarray) -> np.ndarray:
     """Normalize array to [0, 1], returning zeros for constant inputs."""
     x = np.asarray(arr, dtype=np.float64)
@@ -82,6 +91,8 @@ def _load_gray_image(path: Path) -> np.ndarray:
         return np.mean(arr.astype(np.float64), axis=2)
     raise ValueError(f"Unsupported image shape for {path}: {arr.shape}")
 
+
+#%% ---------- Phase pattern builders ----------
 def _amplitude_to_uint8(amplitude: np.ndarray) -> np.ndarray:
     """Rescale amplitude in [0,255] for uint8 representation."""
     amp = np.asarray(amplitude, dtype=np.float64)
@@ -128,7 +139,8 @@ def rs_simple(target_amplitude: np.ndarray) -> np.ndarray:
     slm_field = np.fft.ifft2(np.fft.ifftshift(fourier_field))
     return np.angle(slm_field)
 
-#Helpers just for the naming
+
+#%% ---------- Filename/tag helpers ----------
 def _sortable_tag(value: float, digits: int = 3, exp_width: int = 2) -> str:
     """Convert a float value to a sortable string tag."""
     if value == 0:
@@ -168,10 +180,10 @@ def _alpha_tag_e06(value: float) -> str:
     return f"{prefix}{number}e06"
 
 
-#%% Generate and save patterns
-
-# Calibration Frame
+#%% [1] Prepare output directory
 patterns_dir.mkdir(parents=True, exist_ok=True) # Create output directory if it doesn't exist
+
+#%% [2] Generate calibration pattern (optional)
 
 if generate_calibration_pattern:
     # 1) Load calibration target from TIFF and map to [0, 1] amplitude.
@@ -201,7 +213,7 @@ if generate_calibration_pattern:
     )
 
 
-# Phase diversity imgs
+#%% [3] Generate diversity phase BMP patterns
 xx_m, yy_m = _make_physical_grid(slm_height, slm_width, pixel_pitch)
 linx_tag = _sortable_tag(lin_x_cpm)
 liny_tag = _sortable_tag(lin_y_cpm)
@@ -225,7 +237,7 @@ for alpha in np.sort(alphas):
 print(f"Generated {len(alphas)} patterns in: {patterns_dir}")
 
 
-#%% Write measurement log (initialization)
+#%% [4] Write measurement log (initialization)
 measure_log = {
     "measurement_label": measurement_label,
     "dataset_dir": str(dataset_dir),
